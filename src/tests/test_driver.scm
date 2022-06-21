@@ -25,5 +25,5 @@
   (let ((result (compile-run-exp e)))
     	(printf "~a... " name)
 	(cond ((string=? result expected) (printf "PASSED\n"))
-	      (#t (printf "FAILED\n Result: ~a, Expected: ~a\n" result expected)))))
+	      (else (printf "FAILED\n Result: ~a, Expected: ~a\n" result expected)))))
 
