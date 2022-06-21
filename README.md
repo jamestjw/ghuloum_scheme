@@ -6,9 +6,9 @@ Following this [guide](http://scheme2006.cs.uchicago.edu/11-ghuloum.pdf) to incr
 * [Petite Chez Scheme v8.4](https://github.com/cisco/ChezScheme/)
 
 ## How to run?
-To compile the program
+To run the program
 ```bash
-petite  --script main.scm
+petite --script compiler.scm
 ```
 
 This produces an assembly file called `output.s`.

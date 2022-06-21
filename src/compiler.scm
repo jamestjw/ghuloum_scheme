@@ -1,8 +1,8 @@
-(define out-file (open-output-file "output.s" 'truncate))
+(define (out-file) (open-output-file "output.s" 'truncate))
 
-(define (emit . args)
-  (apply fprintf out-file args)
-  (newline out-file))
+(define (emit out-port . args)
+  (apply fprintf out-port args)
+  (newline out-port))
 
 (define fixnum-shift 2)
 (define char-shift 8)
@@ -20,12 +20,14 @@
       ((eq? x '()) empty-list-value)
       (#t (error "compile-program" "Unexpected value type"))
       ))
-  (emit "\t.text")
-  (emit ".globl _scheme_entry")
+  (define of (out-file))
+  (emit of "\t.text")
+  (emit of ".globl _scheme_entry")
   ; Not needed by Mach-O assembler
   ; (emit "\t.type scheme_entry, @function")
-  (emit "_scheme_entry:")
-  (emit "\tmovl $~a, %eax" (immediate-rep x))
-  (emit "\tret"))
+  (emit of "_scheme_entry:")
+  (emit of "\tmovl $~a, %eax" (immediate-rep x))
+  (emit of "\tret")
+  (flush-output-port of)
+  (close-port of))
 
-(compile-program 5)
