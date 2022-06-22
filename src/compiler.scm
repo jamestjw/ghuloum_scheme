@@ -172,5 +172,12 @@
     (emit out-port "\tsete %al")                        ; Set lower byte of %eax to 1 if comparison was successful
     (emit out-port "\tsall $~a, %eax" bool-shift)       ; Apply appropriate shift
     (emit out-port "\torl $~a, %eax" bool-tag))         ; and tag
+
+  (define-primitive (lognot out-port arg)
+    (if (integer? arg)
+      (begin
+        (emit-expr out-port arg)
+        (emit out-port "\txorl $0xFFFFFFFC, %eax")) ; Flip all bits except the last two
+      (error "emit-expr" "lognot can only be called with integers")))
   ; ******* Definition of primitives ******
 )
