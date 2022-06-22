@@ -1,5 +1,5 @@
 (library (test_driver)
-  (export test-case)
+  (export test-case test-exception)
   (import (except (chezscheme) compile-program) (compiler))
 
   ; https://stackoverflow.com/questions/71627605/capturing-the-output-of-an-external-call-as-a-string-in-chez-scheme
@@ -27,4 +27,8 @@
     (let ((result (compile-run-exp e)))
         (printf "~a... " name)
     (cond ((string=? result expected) (printf "PASSED\n"))
-          (else (printf "FAILED\nResult: ~a, Expected: ~a\n" result expected))))))
+          (else (printf "FAILED\nResult: ~a, Expected: ~a\n" result expected)))))
+
+  (define (test-exception e name)
+    (printf "~a (Exception expected)... " name)
+    (guard (x [else (printf "PASSED\n")]) (begin (compile-run-exp e) (printf "FAILED\n")))))
