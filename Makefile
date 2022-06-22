@@ -1,2 +1,2 @@
 test:
-	cd src/tests && petite --script test_cases.scm
+	@petite --libdirs "./src/tests:./src" --script src/tests/test_cases.scm
