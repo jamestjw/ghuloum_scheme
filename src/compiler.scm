@@ -46,12 +46,6 @@
       ((null? x) empty-list-value)
       (else (error "compile-program" "Unexpected value type"))))
 
-  ; (define (primcall-op x)
-  ;   (case (car x)
-  ;     ; TODO: Make this more DRY (consider returning just (car x)?)
-  ;     ((add1) 'add1)
-  ;     (else (error "primcall-op" "Invalid primitive operator"))))
-
   ; Make it more convenient to define a primitive
   ; Binds the argument count and the code to emit
   ; the function call to a symbol corresponding
@@ -91,7 +85,7 @@
   ; TODO: Improve this
   (define (variable? expr) (symbol? expr))
 
-  (define (let? expr) (eq? (car expr) 'let))
+  (define (let? expr) (or (eq? (car expr) 'let) (eq? (car expr) 'let*)))
 
   (define (emit-stack-save out-port si)
     (emit out-port "\tmovl %eax, ~s(%rsp)" si))
@@ -106,8 +100,11 @@
     (let process-let ([b* bindings] [si si] [new-env env])
       (cond
         [(null? b*) (emit-expr out-port si new-env body)]
-        [else (let ([b (car b*)]) ; Here we assume that `b` is a pair
-          (emit-expr out-port si env (cadr b)) ; Use the original environment while still evaluating bindings
+        ; Here we assume that `b` is a pair
+        ; For the classic `let`, we use the environment that was passed in,
+        ; otherwise we use the updated environment as variables are binded
+        [else (let ([b (car b*)] [env-to-use (if (eq? 'let (car expr)) env new-env)])
+          (emit-expr out-port si env-to-use (cadr b))
           (emit-stack-save out-port si)
           (process-let (cdr b*) (next-stack-index si) (extend-env (car b) si new-env)))])))
 

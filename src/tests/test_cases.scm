@@ -106,3 +106,6 @@
                 (let ([x (+ x x)])
                   (let ([x (+ x x)])
                     (+ x x))))) "192" "Let (many levels of nesting v2)")
+(test-case '(let* ([x 1])
+              (let* ([x (+ x 1)] [y (+ x 1)])
+                y)) "3" "Let*")
