@@ -34,14 +34,14 @@
   (define (emit-preamble out-port) '())
 
   (define (immediate? x)
-    (or (integer? x) (char? x) (boolean? x) (eq? x '())))
+    (or (integer? x) (char? x) (boolean? x) (null? x)))
 
   (define (immediate-rep x)
     (cond
       ((integer? x) (ash x fixnum-shift))
       ((char? x) (logior (ash (char->integer x) char-shift) char-tag))
       ((boolean? x) (logior (ash (if x 1 0) bool-shift) bool-tag))
-      ((eq? x '()) empty-list-value)
+      ((null? x) empty-list-value)
       (else (error "compile-program" "Unexpected value type"))))
 
   ; (define (primcall-op x)
@@ -79,7 +79,7 @@
       (error "check-primcall-args" (string-append "Invalid number of arguments for " (symbol->string prim)))))
 
   (define (emit-primcall output-port si expr)
-    (let ([prim (car expr)] [args (map eval (cdr expr))])
+    (let ([prim (car expr)] [args (cdr expr)])
       (check-primcall-args prim args) ; Verify that args are valid for this primcall
       (apply (primitive-emitter prim) output-port si args)))
 
@@ -90,6 +90,7 @@
     (cond
       [(immediate? expr) (emit-immediate out-port expr)]
       [(primcall? expr) (emit-primcall out-port si expr)]
+      [(eq? '() (eval expr)) (emit-expr out-port si '())] ; Workaround until we can deal with quotes
       [else (error "emit-expr" (string-append "Unknown expression " (sexpr->string expr) " encountered"))]))
 
   (define (compile-program expr)
@@ -110,6 +111,23 @@
 
     (flush-output-port of)
     (close-port of))
+
+  (define (emit-binary-comparison op out-port si arg1 arg2)
+    (define asm_op (case op
+      ((=) "sete")
+      ((>) "setg")
+      ((>=) "setge")
+      ((<) "setl")
+      ((<=) "setle")
+      (else (error "emit-binary-comparison" "Invalid operator"))))
+    (emit-expr out-port si arg1)
+    (emit out-port "\tmovl %eax, ~s(%rsp)" si)
+    (emit-expr out-port (- si word-size) arg2)
+    (emit out-port "\tcmpl %eax, ~s(%rsp)" si)
+    (emit out-port "\tmovl $0, %eax")
+    (emit out-port "\t~s %al" asm_op)
+    (emit out-port "\tsall $~a, %eax" bool-shift)
+    (emit out-port "\torl $~a, %eax" bool-tag))
 
   ; ******* Definition of primitives ******
   (define-primitive (add1 out-port si arg)
@@ -164,8 +182,8 @@
 
   (define-primitive (integer? out-port si arg)
     (emit-expr out-port si arg)
-    (emit out-port "\tand $~a, %eax" fixnum-tag-mask)     ; Gets the tag of a fixnum
-    (emit out-port "\tcmpl $~a, %eax" fixnum-tag)         ; Compares %eax to a tag of a fixnum
+    (emit out-port "\tand $~a, %eax" fixnum-tag-mask)   ; Gets the tag of a fixnum
+    (emit out-port "\tcmpl $~a, %eax" fixnum-tag)       ; Compares %eax to a tag of a fixnum
     (emit out-port "\tmovl $0, %eax")                   ; Zeroes %eax
     (emit out-port "\tsete %al")                        ; Set lower byte of %eax to 1 if comparison was successful
     (emit out-port "\tsall $~a, %eax" bool-shift)       ; Apply appropriate shift
@@ -195,5 +213,58 @@
         (emit-expr out-port si arg)
         (emit out-port "\txorl $0xFFFFFFFC, %eax")) ; Flip all bits except the last two
       (error "emit-expr" "lognot can only be called with integers")))
+
+  ; TODO: Is shifting necessary?
+  (define-primitive (+ out-port si arg1 arg2)
+    (emit-expr out-port si arg1)
+    (emit out-port "\tmovl %eax, ~s(%rsp)" si)
+    (emit-expr out-port (- si word-size) arg2)
+    (emit out-port "\taddl ~s(%rsp), %eax" si))
+
+  ; TODO: Is shifting necessary?
+  (define-primitive (- out-port si arg1 arg2)
+    (emit-expr out-port si arg2)
+    (emit out-port "\tmovl %eax, ~s(%rsp)" si)
+    (emit-expr out-port (- si word-size) arg1)
+    (emit out-port "\tsubl ~s(%rsp), %eax" si))
+
+  (define-primitive (* out-port si arg1 arg2)
+    (emit-expr out-port si arg1)
+    (emit out-port "\tshr $~a, %eax" fixnum-shift)
+    (emit out-port "\tmovl %eax, ~s(%rsp)" si)
+    (emit-expr out-port (- si word-size) arg2)
+    (emit out-port "\tshr $~a, %eax" fixnum-shift)
+    (emit out-port "\timul ~s(%rsp), %eax" si)
+    (emit out-port "\tshl $~a, %eax" fixnum-shift))
+
+  (define-primitive (= out-port si arg1 arg2)
+    (emit-binary-comparison '= out-port si arg1 arg2))
+
+  (define-primitive (< out-port si arg1 arg2)
+    (emit-binary-comparison '< out-port si arg1 arg2))
+
+  (define-primitive (<= out-port si arg1 arg2)
+    (emit-binary-comparison '<= out-port si arg1 arg2))
+
+  (define-primitive (> out-port si arg1 arg2)
+    (emit-binary-comparison '> out-port si arg1 arg2))
+
+  (define-primitive (>= out-port si arg1 arg2)
+    (emit-binary-comparison '>= out-port si arg1 arg2))
+
+  (define-primitive (char=? out-port si arg1 arg2)
+    (emit-binary-comparison '= out-port si arg1 arg2))
+
+  (define-primitive (char<? out-port si arg1 arg2)
+    (emit-binary-comparison '< out-port si arg1 arg2))
+
+  (define-primitive (char<=? out-port si arg1 arg2)
+    (emit-binary-comparison '<= out-port si arg1 arg2))
+
+  (define-primitive (char>? out-port si arg1 arg2)
+    (emit-binary-comparison '> out-port si arg1 arg2))
+
+  (define-primitive (char>=? out-port si arg1 arg2)
+    (emit-binary-comparison '>= out-port si arg1 arg2))
   ; ******* Definition of primitives ******
 )
