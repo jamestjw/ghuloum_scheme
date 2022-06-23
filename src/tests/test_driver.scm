@@ -1,5 +1,5 @@
 (library (test_driver)
-  (export test-case test-exception)
+  (export test-case test-exception test-case-with-expr-appended-to-name)
   (import (except (chezscheme) compile-program) (compiler) (common))
 
   ; https://stackoverflow.com/questions/71627605/capturing-the-output-of-an-external-call-as-a-string-in-chez-scheme
@@ -31,6 +31,9 @@
     (if test-filter
       (string-contains? name test-filter)
       #t)) ; Return true if no filter is given
+
+  (define (test-case-with-expr-appended-to-name e expected name)
+    (test-case e expected (string-append name " - " (sexpr->string e))))
 
   (define (test-case e expected name)
     (if (execute-test? name)

@@ -19,6 +19,8 @@
 
   (define (out-file) (open-output-file "output.s" 'truncate))
 
+  (define (next-stack-index si) (- si word-size))
+
   (define (emit out-port . args)
     (apply fprintf out-port args)
     (newline out-port))
@@ -56,11 +58,11 @@
   ; to the name of the primitive
   (define-syntax define-primitive
     (syntax-rules ()
-     [(_ (prim-name out-port si arg* ...) b b* ...)
+     [(_ (prim-name out-port si env arg* ...) b b* ...)
       (begin
         (putprop 'prim-name '*is-prim* #t)
         (putprop 'prim-name '*arg-count* (length '(arg* ...)))
-        (putprop 'prim-name '*emitter* (lambda (out-port si arg* ...) b b* ...)))]))
+        (putprop 'prim-name '*emitter* (lambda (out-port si env arg* ...) b b* ...)))]))
 
   (define (primitive? x)
     (and (symbol? x) (getprop x '*is-prim*)))
@@ -78,19 +80,52 @@
       '() ; Do nothing if the lengths match
       (error "check-primcall-args" (string-append "Invalid number of arguments for " (symbol->string prim)))))
 
-  (define (emit-primcall output-port si expr)
+  (define (emit-primcall output-port si env expr)
     (let ([prim (car expr)] [args (cdr expr)])
       (check-primcall-args prim args) ; Verify that args are valid for this primcall
-      (apply (primitive-emitter prim) output-port si args)))
+      (apply (primitive-emitter prim) output-port si env args)))
 
   (define (emit-immediate out-port x)
     (emit out-port "\tmovl $~a, %eax" (immediate-rep x)))
 
-  (define (emit-expr out-port si expr)
+  ; TODO: Improve this
+  (define (variable? expr) (symbol? expr))
+
+  (define (let? expr) (eq? (car expr) 'let))
+
+  (define (emit-stack-save out-port si)
+    (emit out-port "\tmovl %eax, ~s(%rsp)" si))
+
+  (define (extend-env sym-name stack-index old-env) (cons (cons sym-name stack-index) old-env))
+
+  (define (lookup-env sym-name env) (assq sym-name env))
+
+  (define (emit-let out-port si env expr)
+    (define bindings (cadr expr))
+    (define body (caddr expr))
+    (let process-let ([b* bindings] [si si] [new-env env])
+      (cond
+        [(null? b*) (emit-expr out-port si new-env body)]
+        [else (let ([b (car b*)]) ; Here we assume that `b` is a pair
+          (emit-expr out-port si env (cadr b)) ; Use the original environment while still evaluating bindings
+          (emit-stack-save out-port si)
+          (process-let (cdr b*) (next-stack-index si) (extend-env (car b) si new-env)))])))
+
+  (define (emit-stack-load out-port si) (emit out-port "\tmovl ~s(%rsp), %eax" si))
+
+  (define (emit-variable-ref out-port env var)
+    (let ([res (lookup-env var env)])
+      (cond
+        [res (emit-stack-load out-port (cdr res))]
+        [else (error "emit-variable-ref" (string-append "Variable not found in scope: " (symbol->string var)))])))
+
+  (define (emit-expr out-port si env expr)
     (cond
       [(immediate? expr) (emit-immediate out-port expr)]
-      [(primcall? expr) (emit-primcall out-port si expr)]
-      [(eq? '() (eval expr)) (emit-expr out-port si '())] ; Workaround until we can deal with quotes
+      [(variable? expr) (emit-variable-ref out-port env expr)]
+      [(let? expr) (emit-let out-port si env expr)]
+      [(primcall? expr) (emit-primcall out-port si env expr)]
+      [(eq? '() (eval expr)) (emit-expr out-port si env '())] ; Workaround until we can deal with quotes
       [else (error "emit-expr" (string-append "Unknown expression " (sexpr->string expr) " encountered"))]))
 
   (define (compile-program expr)
@@ -99,7 +134,7 @@
     (emit-preamble of)
 
     (emit-function-header of "_L_scheme_entry")
-    (emit-expr of (- word-size) expr)
+    (emit-expr of (- word-size) '() expr)
     (emit of "\tret")
 
     (emit-function-header of "_scheme_entry")
@@ -112,7 +147,7 @@
     (flush-output-port of)
     (close-port of))
 
-  (define (emit-binary-comparison op out-port si arg1 arg2)
+  (define (emit-binary-comparison op out-port si env arg1 arg2)
     (define asm_op (case op
       ((=) "sete")
       ((>) "setg")
@@ -120,9 +155,9 @@
       ((<) "setl")
       ((<=) "setle")
       (else (error "emit-binary-comparison" "Invalid operator"))))
-    (emit-expr out-port si arg1)
-    (emit out-port "\tmovl %eax, ~s(%rsp)" si)
-    (emit-expr out-port (- si word-size) arg2)
+    (emit-expr out-port si env arg1)
+    (emit-stack-save out-port si)
+    (emit-expr out-port (next-stack-index si) env arg2)
     (emit out-port "\tcmpl %eax, ~s(%rsp)" si)
     (emit out-port "\tmovl $0, %eax")
     (emit out-port "\t~s %al" asm_op)
@@ -130,33 +165,33 @@
     (emit out-port "\torl $~a, %eax" bool-tag))
 
   ; ******* Definition of primitives ******
-  (define-primitive (add1 out-port si arg)
+  (define-primitive (add1 out-port si env arg)
     (if (integer? arg)
       (begin
-        (emit-expr out-port si arg)
+        (emit-expr out-port si env arg)
         (emit out-port "\taddl $~s, %eax" (immediate-rep 1)))
       (error "emit-expr" "add1? can only be called with integers")))
 
-  (define-primitive (sub1 out-port si arg)
+  (define-primitive (sub1 out-port si env arg)
     (if (integer? arg)
       (begin
-        (emit-expr out-port si arg)
+        (emit-expr out-port si env arg)
         (emit out-port "\tsubl $~s, %eax" (immediate-rep 1)))
       (error "emit-expr" "sub1? can only be called with integers")))
 
-  (define-primitive (integer->char out-port si arg)
-    (emit-expr out-port si arg)
+  (define-primitive (integer->char out-port si env arg)
+    (emit-expr out-port si env arg)
     (emit out-port "\tshl $~a, %eax" fixnum2char-shift)
     (emit out-port "\tor $~a, %eax" char-tag))
 
-  (define-primitive (char->integer out-port si arg)
-    (emit-expr out-port si arg)
+  (define-primitive (char->integer out-port si env arg)
+    (emit-expr out-port si env arg)
     (emit out-port "\tshr $~a, %eax" char2fixnum-shift))
 
-  (define-primitive (zero? out-port si arg)
+  (define-primitive (zero? out-port si env arg)
     (if (integer? arg)
       (begin
-        (emit-expr out-port si arg)
+        (emit-expr out-port si env arg)
         (emit out-port "\tcmpl $0, %eax")              ; Compares %eax to 0
         (emit out-port "\tmovl $0, %eax")              ; Zeroes %eax
         (emit out-port "\tsete %al")                   ; Set lower byte of %eax to 1 if comparison was successful
@@ -164,24 +199,24 @@
         (emit out-port "\torl $~a, %eax" bool-tag))    ; and tag
       (error "emit-expr" "zero? can only be called with integers")))
 
-  (define-primitive (null? out-port si arg)
-    (emit-expr out-port si arg)
+  (define-primitive (null? out-port si env arg)
+    (emit-expr out-port si env arg)
     (emit out-port "\tcmpl $~a, %eax" empty-list-value) ; Compares %eax to empty-list-value
     (emit out-port "\tmovl $0, %eax")                   ; Zeroes %eax
     (emit out-port "\tsete %al")                        ; Set lower byte of %eax to 1 if comparison was successful
     (emit out-port "\tsall $~a, %eax" bool-shift)       ; Apply appropriate shift
     (emit out-port "\torl $~a, %eax" bool-tag))         ; and tag
 
-  (define-primitive (not out-port si arg)
-     (emit-expr out-port si arg)
+  (define-primitive (not out-port si env arg)
+     (emit-expr out-port si env arg)
      (emit out-port "\tcmpl $~a, %eax" bool-tag)         ; Compares %eax to the representation of false
      (emit out-port "\tmovl $0, %eax")                   ; Zeroes %eax
      (emit out-port "\tsete %al")                        ; Set lower byte of %eax to 1 if comparison was successful
      (emit out-port "\tsall $~a, %eax" bool-shift)       ; Apply appropriate shift
      (emit out-port "\torl $~a, %eax" bool-tag))         ; and tag
 
-  (define-primitive (integer? out-port si arg)
-    (emit-expr out-port si arg)
+  (define-primitive (integer? out-port si env arg)
+    (emit-expr out-port si env arg)
     (emit out-port "\tand $~a, %eax" fixnum-tag-mask)   ; Gets the tag of a fixnum
     (emit out-port "\tcmpl $~a, %eax" fixnum-tag)       ; Compares %eax to a tag of a fixnum
     (emit out-port "\tmovl $0, %eax")                   ; Zeroes %eax
@@ -189,8 +224,8 @@
     (emit out-port "\tsall $~a, %eax" bool-shift)       ; Apply appropriate shift
     (emit out-port "\torl $~a, %eax" bool-tag))         ; and tag
 
-  (define-primitive (boolean? out-port si arg)
-    (emit-expr out-port si arg)
+  (define-primitive (boolean? out-port si env arg)
+    (emit-expr out-port si env arg)
     (emit out-port "\tand $~a, %eax" bool-tag-mask)     ; Gets the tag of a boolean
     (emit out-port "\tcmpl $~a, %eax" bool-tag)         ; Compares %eax to bool-tag
     (emit out-port "\tmovl $0, %eax")                   ; Zeroes %eax
@@ -198,8 +233,8 @@
     (emit out-port "\tsall $~a, %eax" bool-shift)       ; Apply appropriate shift
     (emit out-port "\torl $~a, %eax" bool-tag))         ; and tag
 
-  (define-primitive (char? out-port si arg)
-    (emit-expr out-port si arg)
+  (define-primitive (char? out-port si env arg)
+    (emit-expr out-port si env arg)
     (emit out-port "\tand $~a, %eax" char-tag-mask)     ; Gets the tag of a char
     (emit out-port "\tcmpl $~a, %eax" char-tag)         ; Compares %eax to char-tag
     (emit out-port "\tmovl $0, %eax")                   ; Zeroes %eax
@@ -207,62 +242,62 @@
     (emit out-port "\tsall $~a, %eax" bool-shift)       ; Apply appropriate shift
     (emit out-port "\torl $~a, %eax" bool-tag))         ; and tag
 
-  (define-primitive (lognot out-port si arg)
+  (define-primitive (lognot out-port si env arg)
     (if (integer? arg)
       (begin
-        (emit-expr out-port si arg)
+        (emit-expr out-port si env arg)
         (emit out-port "\txorl $0xFFFFFFFC, %eax")) ; Flip all bits except the last two
       (error "emit-expr" "lognot can only be called with integers")))
 
   ; TODO: Is shifting necessary?
-  (define-primitive (+ out-port si arg1 arg2)
-    (emit-expr out-port si arg1)
-    (emit out-port "\tmovl %eax, ~s(%rsp)" si)
-    (emit-expr out-port (- si word-size) arg2)
+  (define-primitive (+ out-port si env arg1 arg2)
+    (emit-expr out-port si env arg1)
+    (emit-stack-save out-port si)
+    (emit-expr out-port (next-stack-index si) env arg2)
     (emit out-port "\taddl ~s(%rsp), %eax" si))
 
   ; TODO: Is shifting necessary?
-  (define-primitive (- out-port si arg1 arg2)
-    (emit-expr out-port si arg2)
-    (emit out-port "\tmovl %eax, ~s(%rsp)" si)
-    (emit-expr out-port (- si word-size) arg1)
+  (define-primitive (- out-port si env arg1 arg2)
+    (emit-expr out-port si env arg2)
+    (emit-stack-save out-port si)
+    (emit-expr out-port (next-stack-index si) env arg1)
     (emit out-port "\tsubl ~s(%rsp), %eax" si))
 
-  (define-primitive (* out-port si arg1 arg2)
-    (emit-expr out-port si arg1)
-    (emit out-port "\tmovl %eax, ~s(%rsp)" si)
-    (emit-expr out-port (- si word-size) arg2)
+  (define-primitive (* out-port si env arg1 arg2)
+    (emit-expr out-port si env arg1)
+    (emit-stack-save out-port si)
+    (emit-expr out-port (next-stack-index si) env arg2)
     (emit out-port "\tshr $~a, %eax" fixnum-shift)
     (emit out-port "\timul ~s(%rsp), %eax" si))
 
-  (define-primitive (= out-port si arg1 arg2)
-    (emit-binary-comparison '= out-port si arg1 arg2))
+  (define-primitive (= out-port si env arg1 arg2)
+    (emit-binary-comparison '= out-port si env arg1 arg2))
 
-  (define-primitive (< out-port si arg1 arg2)
-    (emit-binary-comparison '< out-port si arg1 arg2))
+  (define-primitive (< out-port si env arg1 arg2)
+    (emit-binary-comparison '< out-port si env arg1 arg2))
 
-  (define-primitive (<= out-port si arg1 arg2)
-    (emit-binary-comparison '<= out-port si arg1 arg2))
+  (define-primitive (<= out-port si env arg1 arg2)
+    (emit-binary-comparison '<= out-port si env arg1 arg2))
 
-  (define-primitive (> out-port si arg1 arg2)
-    (emit-binary-comparison '> out-port si arg1 arg2))
+  (define-primitive (> out-port si env arg1 arg2)
+    (emit-binary-comparison '> out-port si env arg1 arg2))
 
-  (define-primitive (>= out-port si arg1 arg2)
-    (emit-binary-comparison '>= out-port si arg1 arg2))
+  (define-primitive (>= out-port si env arg1 arg2)
+    (emit-binary-comparison '>= out-port si env arg1 arg2))
 
-  (define-primitive (char=? out-port si arg1 arg2)
-    (emit-binary-comparison '= out-port si arg1 arg2))
+  (define-primitive (char=? out-port si env arg1 arg2)
+    (emit-binary-comparison '= out-port si env arg1 arg2))
 
-  (define-primitive (char<? out-port si arg1 arg2)
-    (emit-binary-comparison '< out-port si arg1 arg2))
+  (define-primitive (char<? out-port si env arg1 arg2)
+    (emit-binary-comparison '< out-port si env arg1 arg2))
 
-  (define-primitive (char<=? out-port si arg1 arg2)
-    (emit-binary-comparison '<= out-port si arg1 arg2))
+  (define-primitive (char<=? out-port si env arg1 arg2)
+    (emit-binary-comparison '<= out-port si env arg1 arg2))
 
-  (define-primitive (char>? out-port si arg1 arg2)
-    (emit-binary-comparison '> out-port si arg1 arg2))
+  (define-primitive (char>? out-port si env arg1 arg2)
+    (emit-binary-comparison '> out-port si env arg1 arg2))
 
-  (define-primitive (char>=? out-port si arg1 arg2)
-    (emit-binary-comparison '>= out-port si arg1 arg2))
+  (define-primitive (char>=? out-port si env arg1 arg2)
+    (emit-binary-comparison '>= out-port si env arg1 arg2))
   ; ******* Definition of primitives ******
 )
