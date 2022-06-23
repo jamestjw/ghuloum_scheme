@@ -230,12 +230,10 @@
 
   (define-primitive (* out-port si arg1 arg2)
     (emit-expr out-port si arg1)
-    (emit out-port "\tshr $~a, %eax" fixnum-shift)
     (emit out-port "\tmovl %eax, ~s(%rsp)" si)
     (emit-expr out-port (- si word-size) arg2)
     (emit out-port "\tshr $~a, %eax" fixnum-shift)
-    (emit out-port "\timul ~s(%rsp), %eax" si)
-    (emit out-port "\tshl $~a, %eax" fixnum-shift))
+    (emit out-port "\timul ~s(%rsp), %eax" si))
 
   (define-primitive (= out-port si arg1 arg2)
     (emit-binary-comparison '= out-port si arg1 arg2))

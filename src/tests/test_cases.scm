@@ -55,6 +55,7 @@
 (test-case '(- 5 2) "3" "Binary Primitive - (- 5 2)")
 (test-case '(- 10 (- 5 3)) "8" "Binary Primitive - (- 10 (- 5 3))")
 (test-case '(* 2 3) "6" "Binary Primitive - (* 2 3)")
+(test-case '(* 6710886 80) "536870880" "Binary Primitive - * Overflow check")
 (test-case '(= 1 2) "0" "Binary Primitive - (= 1 2)")
 (test-case '(= 4 4) "1" "Binary Primitive - (= 4 4)")
 (test-case '(= #t #t) "1" "Binary Primitive - (= #t #t)")
