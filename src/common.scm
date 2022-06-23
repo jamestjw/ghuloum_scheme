@@ -1,5 +1,5 @@
 (library (common)
-  (export contains? sexpr->string)
+  (export contains? sexpr->string string-contains?)
   (import (rnrs))
 
   (define (contains? list x)
@@ -32,4 +32,18 @@
         ((pair? sexpr)
         (let ((s-car (sexpr->string (car sexpr)))
               (s-cdr (sexpr->string (cdr sexpr))))
-          (string-append "(" s-car " . " s-cdr ")")))))))
+          (string-append "(" s-car " . " s-cdr ")"))))))
+
+  (define (string-drop-first-char s)
+    (guard (x [else ""]) (substring s 1 (string-length s))))
+
+  (define (string-contains? s query)
+    (define query-length (string-length query))
+    (cond
+      ((< (string-length s) query-length) #f)
+      ((= (string-length s) query-length)
+        (string=? s query))
+      (else
+        ; If the first `query-length` letters do not match, call the
+        ; same function without the first character
+        (or (string=? (substring s 0 query-length) query) (string-contains? (string-drop-first-char s) query))))))

@@ -1,6 +1,6 @@
 (library (test_driver)
   (export test-case test-exception)
-  (import (except (chezscheme) compile-program) (compiler))
+  (import (except (chezscheme) compile-program) (compiler) (common))
 
   ; https://stackoverflow.com/questions/71627605/capturing-the-output-of-an-external-call-as-a-string-in-chez-scheme
   (define (capture-standard-output command)
@@ -23,12 +23,28 @@
       (system "rm ./out")
       res))
 
+  (define test-filter (getenv "FILTER"))
+
+  ; Check if a filter is given and skip
+  ; tests that don't match it
+  (define (execute-test? name)
+    (if test-filter
+      (string-contains? name test-filter)
+      #t)) ; Return true if no filter is given
+
   (define (test-case e expected name)
-    (let ((result (compile-run-exp e)))
+    (if (execute-test? name)
+      (let ((result (compile-run-exp e)))
         (printf "~a... " name)
-    (cond ((string=? result expected) (printf "PASSED\n"))
-          (else (printf "FAILED\nResult: ~a, Expected: ~a\n" result expected)))))
+        (cond
+          ((string=? result expected) (printf "PASSED\n"))
+          (else (printf "FAILED\nResult: ~a, Expected: ~a\n" result expected))))
+      '()))
 
   (define (test-exception e name)
-    (printf "~a (Exception expected)... " name)
-    (guard (x [else (printf "PASSED\n")]) (begin (compile-run-exp e) (printf "FAILED\n")))))
+    (if (execute-test? name)
+      (begin
+        (printf "~a (Exception expected)... " name)
+        (guard (x [else (printf "PASSED\n")]) (begin (compile-run-exp e) (printf "FAILED\n")))
+      )
+      '())))

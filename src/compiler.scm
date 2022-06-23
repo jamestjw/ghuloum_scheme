@@ -15,18 +15,23 @@
   (define bool-tag-mask (string->number "1111111" 2)) ; Seven bits (based on the shift)
   (define empty-list-value (string->number "00101111" 2))
 
+  (define word-size 8)
+
   (define (out-file) (open-output-file "output.s" 'truncate))
 
   (define (emit out-port . args)
     (apply fprintf out-port args)
     (newline out-port))
 
-  (define (emit-preamble out-port)
+  (define (emit-function-header out-port fn-name)
     (emit out-port "\t.text")
-    (emit out-port ".globl _scheme_entry")
+    (emit out-port (string-append ".globl " fn-name))
     ; Not needed by Mach-O assembler
     ; (emit out-port "\t.type scheme_entry, @function")
-    (emit out-port "_scheme_entry:"))
+    (emit out-port (string-append fn-name ":")))
+
+  ; Does nothing for now
+  (define (emit-preamble out-port) '())
 
   (define (immediate? x)
     (or (integer? x) (char? x) (boolean? x) (eq? x '())))
@@ -51,11 +56,11 @@
   ; to the name of the primitive
   (define-syntax define-primitive
     (syntax-rules ()
-     [(_ (prim-name out-port arg* ...) b b* ...)
+     [(_ (prim-name out-port si arg* ...) b b* ...)
       (begin
         (putprop 'prim-name '*is-prim* #t)
         (putprop 'prim-name '*arg-count* (length '(arg* ...)))
-        (putprop 'prim-name '*emitter* (lambda (out-port arg* ...) b b* ...)))]))
+        (putprop 'prim-name '*emitter* (lambda (out-port si arg* ...) b b* ...)))]))
 
   (define (primitive? x)
     (and (symbol? x) (getprop x '*is-prim*)))
@@ -73,56 +78,67 @@
       '() ; Do nothing if the lengths match
       (error "check-primcall-args" (string-append "Invalid number of arguments for " (symbol->string prim)))))
 
-  (define (emit-primcall output-port expr)
+  (define (emit-primcall output-port si expr)
     (let ([prim (car expr)] [args (map eval (cdr expr))])
       (check-primcall-args prim args) ; Verify that args are valid for this primcall
-      (apply (primitive-emitter prim) output-port args)))
+      (apply (primitive-emitter prim) output-port si args)))
 
-  (define (emit-expr out-port expr)
+  (define (emit-immediate out-port x)
+    (emit out-port "\tmovl $~a, %eax" (immediate-rep x)))
+
+  (define (emit-expr out-port si expr)
     (cond
-      [(immediate? expr)
-          (emit out-port "\tmovl $~a, %eax" (immediate-rep expr))]
-      [(primcall? expr) (emit-primcall out-port expr)]
+      [(immediate? expr) (emit-immediate out-port expr)]
+      [(primcall? expr) (emit-primcall out-port si expr)]
       [else (error "emit-expr" (string-append "Unknown expression " (sexpr->string expr) " encountered"))]))
 
-  (define (compile-program x)
-   (define of (out-file))
+  (define (compile-program expr)
+    (define of (out-file))
 
-   (emit-preamble of)
-   (emit-expr of x)
-   (emit of "\tret")
+    (emit-preamble of)
 
-   (flush-output-port of)
-   (close-port of))
+    (emit-function-header of "_L_scheme_entry")
+    (emit-expr of (- word-size) expr)
+    (emit of "\tret")
+
+    (emit-function-header of "_scheme_entry")
+    (emit of "\tmovq %rsp, %rbx") ; Save current value of rsp
+    (emit of "\tmovq %rdi, %rsp") ; Assign new value of rsp (from 1st arg of _scheme_entry)
+    (emit of "\tcall _L_scheme_entry")
+    (emit of "\tmovq %rbx, %rsp")
+    (emit of "\tret")
+
+    (flush-output-port of)
+    (close-port of))
 
   ; ******* Definition of primitives ******
-  (define-primitive (add1 out-port arg)
+  (define-primitive (add1 out-port si arg)
     (if (integer? arg)
       (begin
-        (emit-expr out-port arg)
+        (emit-expr out-port si arg)
         (emit out-port "\taddl $~s, %eax" (immediate-rep 1)))
       (error "emit-expr" "add1? can only be called with integers")))
 
-  (define-primitive (sub1 out-port arg)
+  (define-primitive (sub1 out-port si arg)
     (if (integer? arg)
       (begin
-        (emit-expr out-port arg)
+        (emit-expr out-port si arg)
         (emit out-port "\tsubl $~s, %eax" (immediate-rep 1)))
       (error "emit-expr" "sub1? can only be called with integers")))
 
-  (define-primitive (integer->char out-port arg)
-    (emit-expr out-port arg)
+  (define-primitive (integer->char out-port si arg)
+    (emit-expr out-port si arg)
     (emit out-port "\tshl $~a, %eax" fixnum2char-shift)
     (emit out-port "\tor $~a, %eax" char-tag))
 
-  (define-primitive (char->integer out-port arg)
-    (emit-expr out-port arg)
+  (define-primitive (char->integer out-port si arg)
+    (emit-expr out-port si arg)
     (emit out-port "\tshr $~a, %eax" char2fixnum-shift))
 
-  (define-primitive (zero? out-port arg)
+  (define-primitive (zero? out-port si arg)
     (if (integer? arg)
       (begin
-        (emit-expr out-port arg)
+        (emit-expr out-port si arg)
         (emit out-port "\tcmpl $0, %eax")              ; Compares %eax to 0
         (emit out-port "\tmovl $0, %eax")              ; Zeroes %eax
         (emit out-port "\tsete %al")                   ; Set lower byte of %eax to 1 if comparison was successful
@@ -130,24 +146,24 @@
         (emit out-port "\torl $~a, %eax" bool-tag))    ; and tag
       (error "emit-expr" "zero? can only be called with integers")))
 
-  (define-primitive (null? out-port arg)
-    (emit-expr out-port arg)
+  (define-primitive (null? out-port si arg)
+    (emit-expr out-port si arg)
     (emit out-port "\tcmpl $~a, %eax" empty-list-value) ; Compares %eax to empty-list-value
     (emit out-port "\tmovl $0, %eax")                   ; Zeroes %eax
     (emit out-port "\tsete %al")                        ; Set lower byte of %eax to 1 if comparison was successful
     (emit out-port "\tsall $~a, %eax" bool-shift)       ; Apply appropriate shift
     (emit out-port "\torl $~a, %eax" bool-tag))         ; and tag
 
-  (define-primitive (not out-port arg)
-     (emit-expr out-port arg)
+  (define-primitive (not out-port si arg)
+     (emit-expr out-port si arg)
      (emit out-port "\tcmpl $~a, %eax" bool-tag)         ; Compares %eax to the representation of false
      (emit out-port "\tmovl $0, %eax")                   ; Zeroes %eax
      (emit out-port "\tsete %al")                        ; Set lower byte of %eax to 1 if comparison was successful
      (emit out-port "\tsall $~a, %eax" bool-shift)       ; Apply appropriate shift
      (emit out-port "\torl $~a, %eax" bool-tag))         ; and tag
 
-  (define-primitive (integer? out-port arg)
-    (emit-expr out-port arg)
+  (define-primitive (integer? out-port si arg)
+    (emit-expr out-port si arg)
     (emit out-port "\tand $~a, %eax" fixnum-tag-mask)     ; Gets the tag of a fixnum
     (emit out-port "\tcmpl $~a, %eax" fixnum-tag)         ; Compares %eax to a tag of a fixnum
     (emit out-port "\tmovl $0, %eax")                   ; Zeroes %eax
@@ -155,8 +171,8 @@
     (emit out-port "\tsall $~a, %eax" bool-shift)       ; Apply appropriate shift
     (emit out-port "\torl $~a, %eax" bool-tag))         ; and tag
 
-  (define-primitive (boolean? out-port arg)
-    (emit-expr out-port arg)
+  (define-primitive (boolean? out-port si arg)
+    (emit-expr out-port si arg)
     (emit out-port "\tand $~a, %eax" bool-tag-mask)     ; Gets the tag of a boolean
     (emit out-port "\tcmpl $~a, %eax" bool-tag)         ; Compares %eax to bool-tag
     (emit out-port "\tmovl $0, %eax")                   ; Zeroes %eax
@@ -164,8 +180,8 @@
     (emit out-port "\tsall $~a, %eax" bool-shift)       ; Apply appropriate shift
     (emit out-port "\torl $~a, %eax" bool-tag))         ; and tag
 
-  (define-primitive (char? out-port arg)
-    (emit-expr out-port arg)
+  (define-primitive (char? out-port si arg)
+    (emit-expr out-port si arg)
     (emit out-port "\tand $~a, %eax" char-tag-mask)     ; Gets the tag of a char
     (emit out-port "\tcmpl $~a, %eax" char-tag)         ; Compares %eax to char-tag
     (emit out-port "\tmovl $0, %eax")                   ; Zeroes %eax
@@ -173,10 +189,10 @@
     (emit out-port "\tsall $~a, %eax" bool-shift)       ; Apply appropriate shift
     (emit out-port "\torl $~a, %eax" bool-tag))         ; and tag
 
-  (define-primitive (lognot out-port arg)
+  (define-primitive (lognot out-port si arg)
     (if (integer? arg)
       (begin
-        (emit-expr out-port arg)
+        (emit-expr out-port si arg)
         (emit out-port "\txorl $0xFFFFFFFC, %eax")) ; Flip all bits except the last two
       (error "emit-expr" "lognot can only be called with integers")))
   ; ******* Definition of primitives ******
