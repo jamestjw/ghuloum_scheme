@@ -9,6 +9,9 @@ Following this [guide](http://scheme2006.cs.uchicago.edu/11-ghuloum.pdf) to incr
 To run the tests, simply run
 ```bash
 make test
+
+# Filter tests by name (currently does an exact string match)
+FILTER="null?" make test
 ```
 
 For each test case, the compiler produces an assembly file called `output.s`.
