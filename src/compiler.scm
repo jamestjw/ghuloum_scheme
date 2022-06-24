@@ -14,6 +14,7 @@
   (define bool-tag (string->number "0011111" 2))
   (define bool-tag-mask (string->number "1111111" 2)) ; Seven bits (based on the shift)
   (define empty-list-value (string->number "00101111" 2))
+  (define pair-tag (string->number "001" 2))
 
   (define word-size 8)
 
@@ -80,7 +81,7 @@
       (apply (primitive-emitter prim) output-port si env args)))
 
   (define (emit-immediate out-port x)
-    (emit out-port "\tmovl $~a, %eax" (immediate-rep x)))
+    (emit out-port "\tmovq $~a, %rax" (immediate-rep x)))
 
   ; TODO: Improve this
   (define (variable? expr) (symbol? expr))
@@ -93,7 +94,10 @@
   (define (if? expr) (eq? (car expr) 'if))
 
   (define (emit-stack-save out-port si)
-    (emit out-port "\tmovl %eax, ~s(%rsp)" si))
+    (emit-copy-register-stack out-port si "rax"))
+
+  (define (emit-copy-register-stack out-port si register)
+    (emit out-port "\tmovq %~a, ~s(%rsp)" register si))
 
   (define (extend-env sym-name stack-index old-env) (cons (cons sym-name stack-index) old-env))
 
@@ -113,7 +117,8 @@
           (emit-stack-save out-port si)
           (process-let (cdr b*) (next-stack-index si) (extend-env (car b) si new-env)))])))
 
-  (define (emit-stack-load out-port si) (emit out-port "\tmovl ~s(%rsp), %eax" si))
+  (define (emit-stack-load out-port si) (emit-stack-load-register out-port si "rax"))
+  (define (emit-stack-load-register out-port si register) (emit out-port "\tmovq ~s(%rsp), %~a" si register))
 
   (define (emit-variable-ref out-port env var)
     (let ([res (lookup-env var env)])
@@ -168,10 +173,25 @@
     (emit of "\tret")
 
     (emit-function-header of "_scheme_entry")
-    (emit of "\tmovq %rsp, %rbx") ; Save current value of rsp
-    (emit of "\tmovq %rdi, %rsp") ; Assign new value of rsp (from 1st arg of _scheme_entry)
+    (emit of "\tmovq %rdi, %rcx") ; Get address of struct to store register values (from 1st arg of _scheme_entry)
+    ; Store registers in context struct
+    (emit of "\tmovq %rbx, 8(%rcx)")
+    (emit of "\tmovq %rsi, 32(%rcx)")
+    (emit of "\tmovq %rdi, 40(%rcx)")
+    (emit of "\tmovq %rbp, 48(%rcx)")
+    (emit of "\tmovq %rsp, 56(%rcx)")
+
+    (emit of "\tmovq %rsi, %rsp") ; Store stack pointer in rsp
+    (emit of "\tmovq %rdx, %rbp") ; Store heap pointer in rbp
+
     (emit of "\tcall _L_scheme_entry")
-    (emit of "\tmovq %rbx, %rsp")
+
+    ; Restore values in context struct
+    (emit of "\tmovq 8(%rcx), %rbx")
+    (emit of "\tmovq 32(%rcx), %rsi")
+    (emit of "\tmovq 40(%rcx), %rdi")
+    (emit of "\tmovq 48(%rcx), %rbp")
+    (emit of "\tmovq 56(%rcx), %rsp")
     (emit of "\tret")
 
     (flush-output-port of)
@@ -270,7 +290,7 @@
     (if (integer? arg)
       (begin
         (emit-expr out-port si env arg)
-        (emit out-port "\txorl $0xFFFFFFFC, %eax")) ; Flip all bits except the last two
+        (emit out-port "\txorq $0xFFFFFFFFFFFFFFFC, %rax")) ; Flip all bits except the last two
       (error "emit-expr" "lognot can only be called with integers")))
 
   ; TODO: Is shifting necessary?
@@ -323,5 +343,26 @@
 
   (define-primitive (char>=? out-port si env arg1 arg2)
     (emit-binary-comparison '>= out-port si env arg1 arg2))
+
+  (define-primitive (cons out-port si env arg1 arg2)
+    (emit-copy-register-stack out-port si "rbx") ; Store current value of rbx so we can use it to store heap pointer
+    (emit out-port "\tmovq %rbp, %rbx")
+    (emit out-port "\taddq $16, %rbp")
+    (emit-expr out-port (next-stack-index si) env arg2)
+    (emit out-port "\tmovq %rax, 8(%rbx)")
+    (emit-expr out-port (next-stack-index si) env arg1)
+    (emit out-port "\tmovq %rax, 0(%rbx)")
+    (emit out-port "\tmovq %rbx, %rax")
+    (emit out-port "\torq $~a, %rax" pair-tag)
+    (emit-stack-load-register out-port si "rbx") ; Reload value of rbx
+    )
+
+  (define-primitive (car out-port si env arg1)
+    (emit-expr out-port si env arg1)
+    (emit out-port "\tmovq -1(%rax), %rax"))
+
+  (define-primitive (cdr out-port si env arg1)
+    (emit-expr out-port si env arg1)
+    (emit out-port "\tmovq 7(%rax), %rax"))
   ; ******* Definition of primitives ******
 )
