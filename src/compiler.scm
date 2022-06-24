@@ -85,7 +85,12 @@
   ; TODO: Improve this
   (define (variable? expr) (symbol? expr))
 
+  ; TODO: This function should potentially also verify the structure
+  ; of the body etc
   (define (let? expr) (or (eq? (car expr) 'let) (eq? (car expr) 'let*)))
+
+  ; TODO: Verify structure of the body
+  (define (if? expr) (eq? (car expr) 'if))
 
   (define (emit-stack-save out-port si)
     (emit out-port "\tmovl %eax, ~s(%rsp)" si))
@@ -116,14 +121,42 @@
         [res (emit-stack-load out-port (cdr res))]
         [else (error "emit-variable-ref" (string-append "Variable not found in scope: " (symbol->string var)))])))
 
+  (define (emit-je out-port label) (emit out-port "\tje ~a" label))
+  (define (emit-jmp out-port label) (emit out-port "\tjmp ~a" label))
+  (define (emit-label out-port label) (emit out-port "~a:" label))
+
+  (define (emit-if out-port si env expr)
+    (define (if-condition e) (cadr e))
+    (define (true-body e) (caddr e))
+    (define (false-body e) (cadddr e))
+
+    (let ([label-1 (unique-label)] [label-2 (unique-label)])
+      (emit-expr out-port si env (if-condition expr))
+      (emit out-port "\tcmp $~s, %al" (immediate-rep #f)) ; Anything that is not #f is truthy
+      (emit-je out-port label-1)
+      (emit-expr out-port si env (true-body expr))
+      (emit-jmp out-port label-2)
+      (emit-label out-port label-1)
+      (emit-expr out-port si env (false-body expr))
+      (emit-label out-port label-2)))
+
   (define (emit-expr out-port si env expr)
     (cond
       [(immediate? expr) (emit-immediate out-port expr)]
       [(variable? expr) (emit-variable-ref out-port env expr)]
       [(let? expr) (emit-let out-port si env expr)]
+      [(if? expr) (emit-if out-port si env expr)]
       [(primcall? expr) (emit-primcall out-port si env expr)]
       [(eq? '() (eval expr)) (emit-expr out-port si env '())] ; Workaround until we can deal with quotes
       [else (error "emit-expr" (string-append "Unknown expression " (sexpr->string expr) " encountered"))]))
+
+  ; Generates a unique label, e.g. (unique-label) => L_0
+  (define unique-label
+    (let ([count 0])
+      (lambda ()
+        (let ([L (format "L_~s" count)])
+          (set! count (add1 count))
+          L))))
 
   (define (compile-program expr)
     (define of (out-file))
@@ -163,18 +196,12 @@
 
   ; ******* Definition of primitives ******
   (define-primitive (add1 out-port si env arg)
-    (if (integer? arg)
-      (begin
-        (emit-expr out-port si env arg)
-        (emit out-port "\taddl $~s, %eax" (immediate-rep 1)))
-      (error "emit-expr" "add1? can only be called with integers")))
+    (emit-expr out-port si env arg)
+    (emit out-port "\taddl $~s, %eax" (immediate-rep 1)))
 
   (define-primitive (sub1 out-port si env arg)
-    (if (integer? arg)
-      (begin
-        (emit-expr out-port si env arg)
-        (emit out-port "\tsubl $~s, %eax" (immediate-rep 1)))
-      (error "emit-expr" "sub1? can only be called with integers")))
+    (emit-expr out-port si env arg)
+    (emit out-port "\tsubl $~s, %eax" (immediate-rep 1)))
 
   (define-primitive (integer->char out-port si env arg)
     (emit-expr out-port si env arg)
