@@ -383,7 +383,13 @@
     (emit out-port "\taddq %rdi, %rbp "); Advance allocation pointer
 
     ; Populate vector with initial element
-    (emit-expr out-port (next-stack-index si) env vec-elem)
+    ; TODO: This needs to be optimised
+    (emit-copy-register-stack out-port (next-stack-index si) "rdi") ; Save rdi and rsi on the stack before emitting new expression
+    (emit-copy-register-stack out-port (next-stack-index (next-stack-index si)) "rsi")
+    (emit-expr out-port (next-stack-index (next-stack-index (next-stack-index si))) env vec-elem)
+    (emit-stack-load-register out-port (next-stack-index si) "rdi") ; Load values back to registers
+    (emit-stack-load-register out-port (next-stack-index (next-stack-index si)) "rsi")
+
     (let ([label-1 (unique-label)] [label-2 (unique-label)])
       (emit out-port "\tmovq $0, ~s(%rsp)" (next-stack-index si)) ; Set up loop counter in stack
       (emit-jmp out-port label-1)
