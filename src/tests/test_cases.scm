@@ -137,3 +137,7 @@
 (test-case '(cons (cons 5 (cons (cons 1 2) (cons 3 4))) 6) "((5 . ((1 . 2) . (3 . 4))) . 6)" "Cons (quadruply nested)")
 (test-case '(make-vector 5 #\a) "#(a a a a a)" "Vector (simple)")
 (test-case '(vector? (make-vector 4 #t)) "1" "Vector (vector?)")
+(test-case '(vector-length (make-vector 10 #t)) "10" "Vector (vector-length)")
+(test-case '(vector-ref (make-vector 10 #\a) 5) "a" "Vector (vector-ref)")
+; Abuse of syntax until we get multiline let statements to work
+(test-case '(let* ([x (make-vector 5 #\a)] [y (vector-set! x 2 #\c)]) x) "#(a a c a a)" "Vector (vector-set!)")

@@ -1,6 +1,6 @@
 (library (compiler)
   (export compile-program)
-  (import (except (chezscheme) compile-program) (common))  
+  (import (except (chezscheme) compile-program) (common))
 
   (define fixnum-shift 2)
   (define fixnum-tag 0)
@@ -356,8 +356,7 @@
     (emit out-port "\tmovq %rax, 0(%rbx)")
     (emit out-port "\tmovq %rbx, %rax")
     (emit out-port "\torq $~a, %rax" pair-tag)
-    (emit-stack-load-register out-port si "rbx") ; Reload value of rbx
-    )
+    (emit-stack-load-register out-port si "rbx")) ; Reload value of rbx
 
   (define-primitive (car out-port si env arg1)
     (emit-expr out-port si env arg1)
@@ -413,5 +412,37 @@
     (emit out-port "\tsete %al")                        ; Set lower byte of %eax to 1 if comparison was successful
     (emit out-port "\tsall $~a, %eax" bool-shift)       ; Apply appropriate shift
     (emit out-port "\torl $~a, %eax" bool-tag))
+
+  (define-primitive (vector-length out-port si env arg)
+    (emit-expr out-port si env arg)
+    (emit out-port "\txorq $~a, %rax" vector-tag)    ; Remove the vector tag
+    (emit out-port "\tmovq 0(%rax), %rax")          ; Copy vector length
+    (emit out-port "\tshl $~a, %eax" fixnum-shift)) ; Apply fixnum shift
+
+  (define-primitive (vector-ref out-port si env vec pos)
+    (emit-expr out-port si env pos)
+    (emit out-port "\tshr $~a, %rax" fixnum-shift) ; Remove fixnum shift
+    (emit-stack-save out-port si) ; Save index on the stack
+
+    (emit-expr out-port (next-stack-index si) env vec)
+    (emit out-port "\txorq $~a, %rax" vector-tag) ; Remove vector tag
+    (emit-stack-load-register out-port si "rdi") ; Load index to rdi
+    ; Move from wordsz + vec-base + rdi * wordsz to eax
+    ; Skip the first elem as we store the vector length there
+    (emit out-port "\tmovq ~a(%rax, %rdi, ~a), %rax" word-size word-size))
+
+  (define-primitive (vector-set! out-port si env vec pos val)
+    (emit-expr out-port si env pos)
+    (emit out-port "\tshr $~a, %rax" fixnum-shift) ; Remove fixnum shift
+    (emit-stack-save out-port si) ; Save index on the stack
+
+    (emit-expr out-port (next-stack-index si) env val)
+    (emit-stack-save out-port (next-stack-index si)) ; Save value on the stack
+
+    (emit-expr out-port (next-stack-index (next-stack-index si)) env vec)
+    (emit out-port "\txorq $~a, %rax" vector-tag) ; Remove vector tag
+    (emit-stack-load-register out-port si "rdi") ; Load index to rdi
+    (emit-stack-load-register out-port (next-stack-index si) "rsi") ; Load value to rsi
+    (emit out-port "\tmovq %rsi, ~a(%rax, %rdi, ~a)" word-size word-size)) ; Copy value to vector
   ; ******* Definition of primitives ******
 )
