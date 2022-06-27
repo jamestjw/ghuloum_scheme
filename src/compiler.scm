@@ -15,6 +15,8 @@
   (define bool-tag-mask (string->number "1111111" 2)) ; Seven bits (based on the shift)
   (define empty-list-value (string->number "00101111" 2))
   (define pair-tag (string->number "001" 2))
+  (define vector-tag (string->number "010" 2))
+  (define string-tag (string->number "011" 2))
 
   (define word-size 8)
 
@@ -364,5 +366,46 @@
   (define-primitive (cdr out-port si env arg1)
     (emit-expr out-port si env arg1)
     (emit out-port "\tmovq 7(%rax), %rax"))
+
+  (define-primitive (make-vector out-port si env vec-length vec-elem)
+    (emit-expr out-port si env vec-length)
+    (emit out-port "\tshr $~a, %eax" fixnum-shift) ; Remove fixnum shift
+    (emit-stack-save out-port si) ; Save num elems on the stack
+    (emit out-port "\tmovq %rax, 0(%rbp)") ; Store vec length
+
+    ; Align to next object boundary
+    (emit out-port "\timulq $~a, %rax" word-size) ; Multiply vec length by word-size
+    (emit out-port "\tmovq %rax, %rdi") ; Copy the length to rdi to calculate word aligned vec length
+    (emit out-port "\taddq $15, %rdi")
+    (emit out-port "\tandq $-8, %rdi")
+
+    (emit out-port "\tmovq %rbp, %rsi") ; Save curr allocation pointer
+    (emit out-port "\taddq %rdi, %rbp "); Advance allocation pointer
+
+    ; Populate vector with initial element
+    (emit-expr out-port (next-stack-index si) env vec-elem)
+    (let ([label-1 (unique-label)] [label-2 (unique-label)])
+      (emit out-port "\tmovq $0, ~s(%rsp)" (next-stack-index si)) ; Set up loop counter in stack
+      (emit-jmp out-port label-1)
+      (emit-label out-port label-2)
+      (emit out-port "\tmovq %rax, ~a(%rsi,%rdi,~a)" word-size word-size) ; Move rax to Vptr + counter*size + 0
+      (emit out-port "\taddq $1, ~s(%rsp)" (next-stack-index si)) ; Increment loop counter
+      (emit-label out-port label-1)
+      (emit-stack-load-register out-port (next-stack-index si) "rdi") ; Load loop counter to rdi
+      (emit out-port "\tcmpq ~s(%rsp), %rdi" si) ; Compare loop counter to num elems
+      (emit out-port "\tjl ~s" label-2)) ; Jump to next iteration if less than num elems
+
+    ; Prepare final pointer to return
+    (emit out-port "\tmovq %rsi, %rax")
+    (emit out-port "\torq $~a, %rax" vector-tag)) ; Or with the vector tag
+
+  (define-primitive (vector? out-port si env arg)
+    (emit-expr out-port si env arg)
+    (emit out-port "\tandq $~a, %rax" vector-tag)       ; Gets the tag of a vector
+    (emit out-port "\tcmpq $~a, %rax" vector-tag)       ; Compares %eax to a tag of a fixnum
+    (emit out-port "\tmovl $0, %eax")                   ; Zeroes %eax
+    (emit out-port "\tsete %al")                        ; Set lower byte of %eax to 1 if comparison was successful
+    (emit out-port "\tsall $~a, %eax" bool-shift)       ; Apply appropriate shift
+    (emit out-port "\torl $~a, %eax" bool-tag))
   ; ******* Definition of primitives ******
 )

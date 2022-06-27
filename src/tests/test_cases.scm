@@ -135,3 +135,5 @@
 (test-case '(let ([x (cons (cons 1 2) (cons 3 4))]) (car (cdr x))) "3" "Cons (doubly nested with cadr)")
 (test-case '(cons 5 (cons (cons 1 2) (cons 3 4))) "(5 . ((1 . 2) . (3 . 4)))" "Cons (triply nested)")
 (test-case '(cons (cons 5 (cons (cons 1 2) (cons 3 4))) 6) "((5 . ((1 . 2) . (3 . 4))) . 6)" "Cons (quadruply nested)")
+(test-case '(make-vector 5 #\a) "#(a a a a a)" "Vector (simple)")
+(test-case '(vector? (make-vector 4 #t)) "1" "Vector (vector?)")

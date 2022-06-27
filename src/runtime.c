@@ -15,6 +15,8 @@
 #define empty_list 47
 #define pair_tag 1
 #define pair_mask 7
+#define vector_mask 3
+#define vector_tag 2
 
 #define STACK_SIZE 16 * 4096 // 16K cells
 #define HEAP_SIZE 16 * 4096  // 16K cells
@@ -60,6 +62,20 @@ void print_val(long val)
     print_val(car_ptr);
     printf(" . ");
     print_val(cdr_ptr);
+    printf(")");
+  }
+  else if ((val & vector_mask) == vector_tag)
+  {
+    long *vector_length = (long *)(val ^ vector_tag);
+
+    printf("#(");
+    for (int i = 0; i < *vector_length; i++)
+    {
+      long *elem = vector_length + i + 1;
+      if (i != 0)
+        printf(" ");
+      print_val(*elem);
+    }
     printf(")");
   }
   else
