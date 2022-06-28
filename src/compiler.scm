@@ -166,38 +166,41 @@
           L))))
 
   (define (compile-program expr)
-    (define of (out-file))
+    (define out-port (open-output-string))
 
-    (emit-preamble of)
+    (emit-preamble out-port)
 
-    (emit-function-header of "_L_scheme_entry")
-    (emit-expr of (- word-size) '() expr)
-    (emit of "\tret")
+    (emit-function-header out-port "_L_scheme_entry")
+    (emit-expr out-port (- word-size) '() expr)
+    (emit out-port "\tret")
 
-    (emit-function-header of "_scheme_entry")
-    (emit of "\tmovq %rdi, %rcx") ; Get address of struct to store register values (from 1st arg of _scheme_entry)
+    (emit-function-header out-port "_scheme_entry")
+    (emit out-port "\tmovq %rdi, %rcx") ; Get address of struct to store register values (from 1st arg of _scheme_entry)
     ; Store registers in context struct
-    (emit of "\tmovq %rbx, 8(%rcx)")
-    (emit of "\tmovq %rsi, 32(%rcx)")
-    (emit of "\tmovq %rdi, 40(%rcx)")
-    (emit of "\tmovq %rbp, 48(%rcx)")
-    (emit of "\tmovq %rsp, 56(%rcx)")
+    (emit out-port "\tmovq %rbx, 8(%rcx)")
+    (emit out-port "\tmovq %rsi, 32(%rcx)")
+    (emit out-port "\tmovq %rdi, 40(%rcx)")
+    (emit out-port "\tmovq %rbp, 48(%rcx)")
+    (emit out-port "\tmovq %rsp, 56(%rcx)")
 
-    (emit of "\tmovq %rsi, %rsp") ; Store stack pointer in rsp
-    (emit of "\tmovq %rdx, %rbp") ; Store heap pointer in rbp
+    (emit out-port "\tmovq %rsi, %rsp") ; Store stack pointer in rsp
+    (emit out-port "\tmovq %rdx, %rbp") ; Store heap pointer in rbp
 
-    (emit of "\tcall _L_scheme_entry")
+    (emit out-port "\tcall _L_scheme_entry")
 
     ; Restore values in context struct
-    (emit of "\tmovq 8(%rcx), %rbx")
-    (emit of "\tmovq 32(%rcx), %rsi")
-    (emit of "\tmovq 40(%rcx), %rdi")
-    (emit of "\tmovq 48(%rcx), %rbp")
-    (emit of "\tmovq 56(%rcx), %rsp")
-    (emit of "\tret")
+    (emit out-port "\tmovq 8(%rcx), %rbx")
+    (emit out-port "\tmovq 32(%rcx), %rsi")
+    (emit out-port "\tmovq 40(%rcx), %rdi")
+    (emit out-port "\tmovq 48(%rcx), %rbp")
+    (emit out-port "\tmovq 56(%rcx), %rsp")
+    (emit out-port "\tret")
 
-    (flush-output-port of)
-    (close-port of))
+    (flush-output-port out-port)
+
+    (let ([of (out-file)])
+	(fprintf of (get-output-string out-port))
+	(close-port of)))
 
   (define (emit-binary-comparison op out-port si env arg1 arg2)
     (define asm_op (case op
