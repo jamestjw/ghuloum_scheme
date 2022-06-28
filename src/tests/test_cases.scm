@@ -141,3 +141,9 @@
 (test-case '(vector-ref (make-vector 10 #\a) 5) "a" "Vector (vector-ref)")
 ; Abuse of syntax until we get multiline let statements to work
 (test-case '(let* ([x (make-vector 5 #\a)] [y (vector-set! x 2 #\c)]) x) "#(a a c a a)" "Vector (vector-set!)")
+(test-case '(make-string 5 #\a) "\"aaaaa\"" "String (make-string)")
+(test-case '(string? (make-string 5 #\a)) "1" "String (string?)")
+(test-case '(string-length (make-string 5 #\a)) "5" "String (length)")
+(test-case '(string-ref (make-string 5 #\a) 2) "a" "String (string-ref)")
+; Abuse of syntax until we get multiline let statements to work
+(test-case '(let* ([x (make-string 5 #\a)] [y (string-set! x 2 #\c)]) x) "\"aacaa\"" "String (string-set!)")

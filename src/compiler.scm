@@ -407,7 +407,7 @@
   (define-primitive (vector? out-port si env arg)
     (emit-expr out-port si env arg)
     (emit out-port "\tandq $~a, %rax" vector-tag)       ; Gets the tag of a vector
-    (emit out-port "\tcmpq $~a, %rax" vector-tag)       ; Compares %eax to a tag of a fixnum
+    (emit out-port "\tcmpq $~a, %rax" vector-tag)       ; Compares %eax to a tag of a vector
     (emit out-port "\tmovl $0, %eax")                   ; Zeroes %eax
     (emit out-port "\tsete %al")                        ; Set lower byte of %eax to 1 if comparison was successful
     (emit out-port "\tsall $~a, %eax" bool-shift)       ; Apply appropriate shift
@@ -444,5 +444,87 @@
     (emit-stack-load-register out-port si "rdi") ; Load index to rdi
     (emit-stack-load-register out-port (next-stack-index si) "rsi") ; Load value to rsi
     (emit out-port "\tmovq %rsi, ~a(%rax, %rdi, ~a)" word-size word-size)) ; Copy value to vector
+
+  (define-primitive (make-string out-port si env str-length c)
+    (emit-expr out-port si env str-length)
+    (emit out-port "\tshr $~a, %rax" fixnum-shift) ; Remove fixnum shift
+    (emit-stack-save out-port si) ; Save length on the stack
+    (emit out-port "\tmovq %rax, 0(%rbp)") ; Store str length
+
+    ; Align to next object boundary
+    (emit out-port "\tmovq %rax, %rdi") ; Copy the length to rdi to calculate word aligned str length
+    (emit out-port "\taddq $15, %rdi")
+    (emit out-port "\tandq $-8, %rdi")
+
+    (emit out-port "\tmovq %rbp, %rsi") ; Save curr allocation pointer
+    (emit out-port "\taddq %rdi, %rbp "); Advance allocation pointer
+
+    ; Populate string with initial element
+    ; TODO: This needs to be optimised
+    (emit-copy-register-stack out-port (next-stack-index si) "rdi") ; Save rdi and rsi on the stack before emitting new expression
+    (emit-copy-register-stack out-port (next-stack-index (next-stack-index si)) "rsi")
+    (emit-expr out-port (next-stack-index (next-stack-index (next-stack-index si))) env c)
+    (emit out-port "\tshr $~a, %rax" char-shift) ; Remove char shift
+    (emit-stack-load-register out-port (next-stack-index si) "rdi") ; Load values back to registers
+    (emit-stack-load-register out-port (next-stack-index (next-stack-index si)) "rsi")
+
+    (let ([label-1 (unique-label)] [label-2 (unique-label)])
+      (emit out-port "\tmovq $0, ~s(%rsp)" (next-stack-index si)) ; Set up loop counter in stack
+      (emit-jmp out-port label-1)
+      (emit-label out-port label-2)
+      (emit out-port "\tmovb %al, ~a(%rsi,%rdi)" word-size) ; Move rax to Vptr + counter + wordsize
+      (emit out-port "\taddq $1, ~s(%rsp)" (next-stack-index si)) ; Increment loop counter
+      (emit-label out-port label-1)
+      (emit-stack-load-register out-port (next-stack-index si) "rdi") ; Load loop counter to rdi
+      (emit out-port "\tcmpq ~s(%rsp), %rdi" si) ; Compare loop counter to num elems
+      (emit out-port "\tjl ~s" label-2)) ; Jump to next iteration if less than num elems
+
+    ; Prepare final pointer to return
+    (emit out-port "\tmovq %rsi, %rax")
+    (emit out-port "\torq $~a, %rax" string-tag))
+
+  (define-primitive (string? out-port si env arg)
+    (emit-expr out-port si env arg)
+    (emit out-port "\tandq $~a, %rax" string-tag)       ; Gets the tag of a string
+    (emit out-port "\tcmpq $~a, %rax" string-tag)       ; Compares %eax to a tag of a string
+    (emit out-port "\tmovl $0, %eax")                   ; Zeroes %eax
+    (emit out-port "\tsete %al")                        ; Set lower byte of %eax to 1 if comparison was successful
+    (emit out-port "\tsall $~a, %eax" bool-shift)       ; Apply appropriate shift
+    (emit out-port "\torl $~a, %eax" bool-tag))
+
+  (define-primitive (string-length out-port si env arg)
+    (emit-expr out-port si env arg)
+    (emit out-port "\txorq $~a, %rax" string-tag)   ; Remove the string tag
+    (emit out-port "\tmovq 0(%rax), %rax")          ; Copy string length
+    (emit out-port "\tshl $~a, %rax" fixnum-shift)) ; Apply fixnum shift
+
+  (define-primitive (string-ref out-port si env s pos)
+    (emit-expr out-port si env pos)
+    (emit out-port "\tshr $~a, %rax" fixnum-shift) ; Remove fixnum shift
+    (emit-stack-save out-port si) ; Save index on the stack
+
+    (emit-expr out-port (next-stack-index si) env s)
+    (emit out-port "\txorq $~a, %rax" string-tag) ; Remove string tag
+    (emit-stack-load-register out-port si "rdi") ; Load index to rdi
+    ; Move from wordsz + str-base + rdi to eax
+    ; Skip the first elem as we store the str length there
+    (emit out-port "\tmovq ~a(%rax, %rdi), %rax" word-size)
+    (emit out-port "\tshl $~a, %rax" char-shift) ; Apply char shift and tag
+    (emit out-port "\torq $~a, %rax" char-tag))
+
+  (define-primitive (string-set! out-port si env s pos c)
+    (emit-expr out-port si env pos)
+    (emit out-port "\tshr $~a, %rax" fixnum-shift) ; Remove fixnum shift
+    (emit-stack-save out-port si) ; Save index on the stack
+
+    (emit-expr out-port (next-stack-index si) env c)
+    (emit out-port "\tshr $~a, %rax" char-shift) ; Remove char tag
+    (emit-stack-save out-port (next-stack-index si)) ; Save value on the stack
+
+    (emit-expr out-port (next-stack-index (next-stack-index si)) env s)
+    (emit out-port "\txorq $~a, %rax" string-tag) ; Remove string tag
+    (emit-stack-load-register out-port si "rdi") ; Load index to rdi
+    (emit-stack-load-register out-port (next-stack-index si) "rsi") ; Load value to rsi
+    (emit out-port "\tmovb %sil, ~a(%rax, %rdi)" word-size))
   ; ******* Definition of primitives ******
 )
