@@ -27,6 +27,10 @@
   ; One port for code segment and another for text segment
   (define-record-type output-ports (fields fns main in-fn))
 
+  ; TODO: DRY this up
+  (define (output-ports-fn-mode op) (make-output-ports (output-ports-fns op) (output-ports-main op) #t))
+  (define (output-ports-main-mode op) (make-output-ports (output-ports-fns op) (output-ports-main op) #f))
+
   (define (emit out-port . args)
     (apply fprintf out-port args)
     (newline out-port))
@@ -37,6 +41,8 @@
     ; Not needed by Mach-O assembler
     ; (emit out-port "\t.type scheme_entry, @function")
     (emit out-port (string-append fn-name ":")))
+
+  (define (emit-return out-port)  (emit out-port "\tret"))
 
   ; Does nothing for now
   (define (emit-preamble out-port) '())
@@ -88,6 +94,9 @@
   (define (emit-immediate out-port x)
     (emit out-port "\tmovq $~a, %rax" (immediate-rep x)))
 
+  (define (emit-call out-port label)
+    (emit out-port "\tcall ~a" label))
+
   ; TODO: Improve this
   (define (variable? expr) (symbol? expr))
 
@@ -97,6 +106,10 @@
 
   ; TODO: Verify structure of the body
   (define (if? expr) (eq? (car expr) 'if))
+
+  (define (labels? expr) (eq? (car expr) 'labels))
+
+  (define (labelcall? expr) (eq? (car expr) 'labelcall))
 
   (define (get-current-port out-port) (if (output-ports-in-fn out-port) (output-ports-fns out-port) (output-ports-main out-port)))
 
@@ -108,7 +121,9 @@
 
   (define (extend-env sym-name stack-index old-env) (cons (cons sym-name stack-index) old-env))
 
-  (define (lookup-env sym-name env) (assq sym-name env))
+  (define (lookup-env sym-name env)
+    (let ([res (assq sym-name env)])
+      (if res (cdr res) #f)))
 
   (define (emit-let out-port si env expr)
     (define bindings (cadr expr))
@@ -130,7 +145,7 @@
   (define (emit-variable-ref out-port env var)
     (let ([res (lookup-env var env)])
       (cond
-        [res (emit-stack-load out-port (cdr res))]
+        [res (emit-stack-load out-port res)]
         [else (error "emit-variable-ref" (string-append "Variable not found in scope: " (symbol->string var)))])))
 
   (define (emit-je out-port label) (emit out-port "\tje ~a" label))
@@ -152,6 +167,62 @@
       (emit-expr out-port si env (false-body expr))
       (emit-label curr-port label-2)))
 
+  ; Returns new stack index and environment
+  (define (extend-env-with-formals formals env si)
+    (fold-left
+      (lambda (acc formal) (cons (extend-env formal (cdr acc) (car acc)) (next-stack-index (cdr acc)) ))
+      (cons env si)
+      formals))
+
+  ; Handle this syntax
+  ; (code (var ...) <Expr>)
+  (define (emit-code out-port env label expr)
+    (let*
+      ([curr-port (get-current-port out-port)]
+        [formals (cadr expr)]
+        [body (caddr expr)]
+        [new-env-si (extend-env-with-formals formals env (- word-size))] ; Skip one slot for the ret
+        [env (car new-env-si)]
+        [si (cdr new-env-si)])
+      (emit-function-header curr-port label)
+      (emit-expr out-port si env body)
+      (emit-return curr-port)))
+
+  ; Handle this syntax
+  ;   (labels ((lvar <LExpr>) ...) <Expr>)
+  ; where <LExpr> ::= (code (var ...) <Expr>)
+  (define (emit-labels out-port si env expr)
+    ; TODO: Ensure that the expression has the right structure
+    (let*
+      ([lvars (cadr expr)]
+        [labels (map car lvars)]
+        [lexprs (map cadr lvars)]
+        [body (caddr expr)]
+        [new-out-port (output-ports-fn-mode out-port)]
+        [curr-port (get-current-port out-port)]
+        [new-env (fold-left (lambda (env label lexpr)
+                    (let* ([l (unique-label)] [new-env (extend-env label l env)])
+                      (emit-code new-out-port new-env l lexpr)
+                      new-env))
+                    '()
+                    labels
+                    lexprs)])
+      (emit-expr out-port si new-env body))) ; Emit body using original port
+
+  ; Handles this syntax
+  ; (labelcall lvar <Expr> ...)
+  (define (emit-label-call out-port si env expr)
+    ; TODO: Add validation of lvar
+    (let ([lvar (cadr expr)] [args (cddr expr)] [curr-port (get-current-port out-port)])
+      (fold-left
+        (lambda (si arg)
+          (emit-expr out-port si env arg)
+          (emit-stack-save curr-port si)
+          (next-stack-index si))
+        (next-stack-index (- word-size)) ; Skip a stack index as we use it for the return address
+        args)
+      (emit-call curr-port (lookup-env lvar env))))
+
   (define (emit-expr out-port si env expr)
     (let ([curr-port (if (output-ports-in-fn out-port) (output-ports-fns out-port) (output-ports-main out-port))])
       (cond
@@ -160,6 +231,8 @@
         [(let? expr) (emit-let out-port si env expr)]
         [(if? expr) (emit-if out-port si env expr)]
         [(primcall? expr) (emit-primcall out-port si env expr)]
+        [(labels? expr) (emit-labels out-port si env expr)]
+        [(labelcall? expr) (emit-label-call out-port si env expr)]
         [(eq? '() (eval expr)) (emit-expr out-port si env '())] ; Workaround until we can deal with quotes
         [else (error "emit-expr" (string-append "Unknown expression " (sexpr->string expr) " encountered"))])))
 
@@ -167,10 +240,10 @@
   (define unique-label
     (let ([count 0])
       (lambda ()
-        (let ([L (format "L_~s" count)])
+        (let ([L (format "_L_~s" count)])
           (set! count (add1 count))
           L))))
-  
+
   (define (emit-entrypoint out-ports)
     (emit-function-header (output-ports-fns out-ports) "_scheme_entry")
     (emit (output-ports-fns out-ports) "\tmovq %rdi, %rcx") ; Get address of struct to store register values (from 1st arg of _scheme_entry)
