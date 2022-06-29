@@ -7,7 +7,9 @@
 (test-case #f "0" "Runtime - Simple Boolean (#f)")
 (test-case '() "()" "Runtime - Empty List")
 (test-case '(add1 5) "6" "Unary Primitive - add1")
+(test-case '(add1 -5) "-4" "Unary Primitive - add1 negative numbers")
 (test-case '(sub1 5) "4" "Unary Primitive - sub1")
+(test-case '(sub1 -2) "-3" "Unary Primitive - sub1 negative numbers")
 ; TODO: Make this work
 ; (test-exception '(add1 #t) "Unary Primitive - add1 with boolean")
 ; (test-exception '(add1 #\t) "Unary Primitive - add1 with char")
@@ -54,6 +56,7 @@
 (test-case '(+ 1 2) "3" "Binary Primitive - (+ 1 2)")
 (test-case '(+ 1 (+ 2 3)) "6" "Binary Primitive - (+ 1 (+ 2 3))")
 (test-case '(- 5 2) "3" "Binary Primitive - (- 5 2)")
+(test-case '(- 2 4) "-2" "Binary Primitive - (- 2 4)")
 (test-case '(- 10 (- 5 3)) "8" "Binary Primitive - (- 10 (- 5 3))")
 (test-case '(* 2 3) "6" "Binary Primitive - (* 2 3)")
 (test-case '(* 6710886 80) "536870880" "Binary Primitive - * Overflow check")
@@ -150,3 +153,4 @@
 (test-case '(labels ((f0 (code (x y) (+ x y)))) (+ 2 3)) "5" "Labels (without calling function)")
 (test-case '(labels ((f0 (code (x y) (+ x y)))) (labelcall f0 2 3)) "5" "Labels (calling simple function)")
 (test-case '(labels ((f0 (code (x y) (+ x y))) (f1 (code (y) (labelcall f0 y 1)))) (labelcall f1 4)) "5" "Labels (f1 calls f0)")
+(test-case '(labels ((f0 (code (x y) (let ([i 5] [j 6]) (+ x (- i (* j y))))))) (labelcall f0 2 3)) "-11" "Labels (with let)")

@@ -308,11 +308,11 @@
   ; ******* Definition of primitives ******
   (define-primitive (add1 curr-port out-port si env arg)
     (emit-expr out-port si env arg)
-    (emit curr-port "\taddl $~s, %eax" (immediate-rep 1)))
+    (emit curr-port "\taddq $~s, %rax" (immediate-rep 1)))
 
   (define-primitive (sub1 curr-port out-port si env arg)
     (emit-expr out-port si env arg)
-    (emit curr-port "\tsubl $~s, %eax" (immediate-rep 1)))
+    (emit curr-port "\tsubq $~s, %rax" (immediate-rep 1)))
 
   (define-primitive (integer->char curr-port out-port si env arg)
     (emit-expr out-port si env arg)
@@ -389,21 +389,21 @@
     (emit-expr out-port si env arg1)
     (emit-stack-save curr-port si)
     (emit-expr out-port (next-stack-index si) env arg2)
-    (emit curr-port "\taddl ~s(%rsp), %eax" si))
+    (emit curr-port "\taddq ~s(%rsp), %rax" si))
 
   ; TODO: Is shifting necessary?
   (define-primitive (- curr-port out-port si env arg1 arg2)
     (emit-expr out-port si env arg2)
     (emit-stack-save curr-port si)
     (emit-expr out-port (next-stack-index si) env arg1)
-    (emit curr-port "\tsubl ~s(%rsp), %eax" si))
+    (emit curr-port "\tsubq ~s(%rsp), %rax" si))
 
   (define-primitive (* curr-port out-port si env arg1 arg2)
     (emit-expr out-port si env arg1)
     (emit-stack-save curr-port si)
     (emit-expr out-port (next-stack-index si) env arg2)
     (emit curr-port "\tshr $~a, %eax" fixnum-shift)
-    (emit curr-port "\timul ~s(%rsp), %eax" si))
+    (emit curr-port "\timulq ~s(%rsp), %rax" si))
 
   (define-primitive (= curr-port out-port si env arg1 arg2)
     (emit-binary-comparison '= curr-port out-port si env arg1 arg2))
