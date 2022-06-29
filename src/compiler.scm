@@ -24,6 +24,9 @@
 
   (define (next-stack-index si) (- si word-size))
 
+  ; One port for code segment and another for text segment
+  (define-record-type output-ports (fields code text))
+
   (define (emit out-port . args)
     (apply fprintf out-port args)
     (newline out-port))
@@ -164,43 +167,46 @@
         (let ([L (format "L_~s" count)])
           (set! count (add1 count))
           L))))
-
-  (define (compile-program expr)
-    (define out-port (open-output-string))
-
-    (emit-preamble out-port)
-
-    (emit-function-header out-port "_L_scheme_entry")
-    (emit-expr out-port (- word-size) '() expr)
-    (emit out-port "\tret")
-
-    (emit-function-header out-port "_scheme_entry")
-    (emit out-port "\tmovq %rdi, %rcx") ; Get address of struct to store register values (from 1st arg of _scheme_entry)
+  
+  (define (emit-entrypoint out-ports)
+    (emit-function-header (output-ports-code out-ports) "_scheme_entry")
+    (emit (output-ports-code out-ports) "\tmovq %rdi, %rcx") ; Get address of struct to store register values (from 1st arg of _scheme_entry)
     ; Store registers in context struct
-    (emit out-port "\tmovq %rbx, 8(%rcx)")
-    (emit out-port "\tmovq %rsi, 32(%rcx)")
-    (emit out-port "\tmovq %rdi, 40(%rcx)")
-    (emit out-port "\tmovq %rbp, 48(%rcx)")
-    (emit out-port "\tmovq %rsp, 56(%rcx)")
+    (emit (output-ports-code out-ports) "\tmovq %rbx, 8(%rcx)")
+    (emit (output-ports-code out-ports) "\tmovq %rsi, 32(%rcx)")
+    (emit (output-ports-code out-ports) "\tmovq %rdi, 40(%rcx)")
+    (emit (output-ports-code out-ports) "\tmovq %rbp, 48(%rcx)")
+    (emit (output-ports-code out-ports) "\tmovq %rsp, 56(%rcx)")
 
-    (emit out-port "\tmovq %rsi, %rsp") ; Store stack pointer in rsp
-    (emit out-port "\tmovq %rdx, %rbp") ; Store heap pointer in rbp
+    (emit (output-ports-code out-ports) "\tmovq %rsi, %rsp") ; Store stack pointer in rsp
+    (emit (output-ports-code out-ports) "\tmovq %rdx, %rbp") ; Store heap pointer in rbp
 
-    (emit out-port "\tcall _L_scheme_entry")
+    (emit (output-ports-code out-ports) "\tcall _L_scheme_entry")
 
     ; Restore values in context struct
-    (emit out-port "\tmovq 8(%rcx), %rbx")
-    (emit out-port "\tmovq 32(%rcx), %rsi")
-    (emit out-port "\tmovq 40(%rcx), %rdi")
-    (emit out-port "\tmovq 48(%rcx), %rbp")
-    (emit out-port "\tmovq 56(%rcx), %rsp")
-    (emit out-port "\tret")
+    (emit (output-ports-code out-ports) "\tmovq 8(%rcx), %rbx")
+    (emit (output-ports-code out-ports) "\tmovq 32(%rcx), %rsi")
+    (emit (output-ports-code out-ports) "\tmovq 40(%rcx), %rdi")
+    (emit (output-ports-code out-ports) "\tmovq 48(%rcx), %rbp")
+    (emit (output-ports-code out-ports) "\tmovq 56(%rcx), %rsp")
+    (emit (output-ports-code out-ports) "\tret"))
 
-    (flush-output-port out-port)
+  (define (compile-program expr)
+    (define out-ports (make-output-ports (open-output-string) (open-output-string)))
+
+    (emit-preamble (output-ports-code out-ports))
+
+    (emit-function-header (output-ports-code out-ports) "_L_scheme_entry")
+    (emit-expr (output-ports-code out-ports) (- word-size) '() expr)
+    (emit (output-ports-code out-ports) "\tret")
+
+    (emit-entrypoint out-ports)
+
+    (flush-output-port (output-ports-code out-ports))
 
     (let ([of (out-file)])
-	(fprintf of (get-output-string out-port))
-	(close-port of)))
+      (fprintf of (get-output-string (output-ports-code out-ports)))
+      (close-port of)))
 
   (define (emit-binary-comparison op out-port si env arg1 arg2)
     (define asm_op (case op
