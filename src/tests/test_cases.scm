@@ -150,7 +150,11 @@
 (test-case '(string-ref (make-string 5 #\a) 2) "a" "String (string-ref)")
 ; Abuse of syntax until we get multiline let statements to work
 (test-case '(let* ([x (make-string 5 #\a)] [y (string-set! x 2 #\c)]) x) "\"aacaa\"" "String (string-set!)")
-(test-case '(labels ((f0 (code (x y) (+ x y)))) (+ 2 3)) "5" "Labels (without calling function)")
-(test-case '(labels ((f0 (code (x y) (+ x y)))) (labelcall f0 2 3)) "5" "Labels (calling simple function)")
-(test-case '(labels ((f0 (code (x y) (+ x y))) (f1 (code (y) (labelcall f0 y 1)))) (labelcall f1 4)) "5" "Labels (f1 calls f0)")
-(test-case '(labels ((f0 (code (x y) (let ([i 5] [j 6]) (+ x (- i (* j y))))))) (labelcall f0 2 3)) "-11" "Labels (with let)")
+(test-case '(labels ((f0 (code (x y) () (+ x y)))) (+ 2 3)) "5" "Labels (without calling function)")
+; TODO: Figure out if these tests are necessary, these calls are made internally anyway
+; If we can ensure that these forms are never needed then we can get rid of these tests
+; (test-case '(labels ((f0 (code (x y) () (+ x y)))) (funcall f0 2 3)) "5" "Labels (calling simple function)")
+; (test-case '(labels ((f0 (code (x y) () (+ x y))) (f1 (code (y) () (funcall f0 y 1)))) (funcall f1 4)) "5" "Labels (f1 calls f0)")
+; (test-case '(labels ((f0 (code (x y) () (let ([i 5] [j 6]) (+ x (- i (* j y))))))) (funcall f0 2 3)) "-11" "Labels (with let)")
+(test-case '(labels ((f0 (code (x y) () (+ x y))))
+                    (funcall (closure f0) 2 3)) "5" "Closure (simple)")

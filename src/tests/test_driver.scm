@@ -18,7 +18,7 @@
   (define (compile-run-exp e)
     (compile-program e)
     (system "gcc output.s src/runtime.c -o out")
-    (system "rm output.s")
+    ;(system "rm output.s")
     (let ((res (remove-trailing-newline (capture-standard-output "./out")))) 
       (system "rm ./out")
       res))
