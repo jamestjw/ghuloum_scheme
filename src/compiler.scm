@@ -17,6 +17,7 @@
   (define pair-tag (string->number "001" 2))
   (define vector-tag (string->number "010" 2))
   (define string-tag (string->number "011" 2))
+  (define closure-tag (string->number "110" 2))
 
   (define word-size 8)
 
@@ -37,7 +38,7 @@
 
   (define (emit-function-header out-port fn-name)
     (emit out-port "\t.text")
-    (emit out-port (string-append ".globl " fn-name))
+    (emit out-port (string-append "\t.globl " fn-name))
     ; Not needed by Mach-O assembler
     ; (emit out-port "\t.type scheme_entry, @function")
     (emit out-port (string-append fn-name ":")))
@@ -94,8 +95,11 @@
   (define (emit-immediate out-port x)
     (emit out-port "\tmovq $~a, %rax" (immediate-rep x)))
 
-  (define (emit-call out-port label)
+  (define (emit-call-label out-port label)
     (emit out-port "\tcall ~a" label))
+
+  (define (emit-call-address out-port)
+    (emit out-port "\tcall *%rax"))
 
   ; TODO: Improve this
   (define (variable? expr) (symbol? expr))
@@ -109,7 +113,9 @@
 
   (define (labels? expr) (eq? (car expr) 'labels))
 
-  (define (labelcall? expr) (eq? (car expr) 'labelcall))
+  (define (funcall? expr) (eq? (car expr) 'funcall))
+
+  (define (closure? expr) (eq? (car expr) 'closure))
 
   (define (get-current-port out-port) (if (output-ports-in-fn out-port) (output-ports-fns out-port) (output-ports-main out-port)))
 
@@ -119,11 +125,13 @@
   (define (emit-copy-register-stack out-port si register)
     (emit out-port "\tmovq %~a, ~s(%rsp)" register si))
 
-  (define (extend-env sym-name stack-index old-env) (cons (cons sym-name stack-index) old-env))
+  (define (extend-env sym-name location old-env) (cons (cons sym-name location) old-env))
 
   (define (lookup-env sym-name env)
     (let ([res (assq sym-name env)])
       (if res (cdr res) #f)))
+
+  (define-record-type closure-ptr-offset (fields offset))
 
   (define (emit-let out-port si env expr)
     (define bindings (cadr expr))
@@ -145,7 +153,9 @@
   (define (emit-variable-ref out-port env var)
     (let ([res (lookup-env var env)])
       (cond
-        [res (emit-stack-load out-port res)]
+        [res (cond
+          [(closure-ptr-offset? res) (emit out-port "\tmovq ~a(%r12), %rax" (closure-ptr-offset-offset res))]
+          [else (emit-stack-load out-port res)])]
         [else (error "emit-variable-ref" (string-append "Variable not found in scope: " (symbol->string var)))])))
 
   (define (emit-je out-port label) (emit out-port "\tje ~a" label))
@@ -174,14 +184,24 @@
       (cons env si)
       formals))
 
+  (define (extend-env-with-free-vars vars env)
+    (car (fold-left
+      (lambda (acc var) (cons (extend-env var (cdr acc) (make-closure-ptr-offset (car acc))) (next-stack-index (cdr acc)) ))
+      (cons env (- word-size))
+      vars)))
+
   ; Handle this syntax
   ; (code (var ...) <Expr>)
   (define (emit-code out-port env label expr)
     (let*
       ([curr-port (get-current-port out-port)]
         [formals (cadr expr)]
-        [body (caddr expr)]
-        [new-env-si (extend-env-with-formals formals env (- word-size))] ; Skip one slot for the ret
+        [free-vars (caddr expr)]
+        [body (cadddr expr)]
+        [new-env-si (extend-env-with-formals
+                      formals
+                      (extend-env-with-free-vars free-vars env)
+                      (- (* 2 word-size)))] ; Skip two slots for the ret and closure ptr
         [env (car new-env-si)]
         [si (cdr new-env-si)])
       (emit-function-header curr-port label)
@@ -210,8 +230,8 @@
       (emit-expr out-port si new-env body))) ; Emit body using original port
 
   ; Handles this syntax
-  ; (labelcall lvar <Expr> ...)
-  (define (emit-label-call out-port si env expr)
+  ; (funcall lvar <Expr> ...)
+  (define (emit-funcall out-port si env expr)
     ; TODO: Add validation of lvar
     (let ([lvar (cadr expr)] [args (cddr expr)] [curr-port (get-current-port out-port)])
       (fold-left
@@ -219,9 +239,35 @@
           (emit-expr out-port si env arg)
           (emit-stack-save curr-port si)
           (next-stack-index si))
-        (next-stack-index (- word-size)) ; Skip a stack index as we use it for the return address
+        (next-stack-index (next-stack-index (- word-size))) ; Skip two stack indexes as we use it for the return address
         args)
-      (emit-call curr-port (lookup-env lvar env))))
+      ; Assume that have a closure in %rax
+      (emit-expr out-port si env lvar)
+      (emit curr-port "\tmovq %r12, ~a(%rsp)" (- word-size)) ; Store value of r12 on the stack before we assign closure pointer
+      (emit curr-port "\txorq $~a, %rax" closure-tag) ; Remove closure-tag
+      (emit curr-port "\tmovq %rax, %r12") ; Store closure pointer in r12
+      (emit curr-port "\tmovq 0(%rax), %rax") ; Copy address of the closure's label to rax
+      (emit-call-address curr-port)
+      (emit curr-port "\tmovq ~a(%rsp), %r12" (- word-size)))) ; Restore value of r12
+
+  ; TODO: Verify that the body of the expression conforms to a closure call
+  (define (emit-closure out-port si env expr)
+    (let* ([lvar-label (lookup-env (cadr expr) env)]
+            [vars (cddr expr)] [curr-port (get-current-port out-port)]
+            [num-vars (length vars)])
+      (emit curr-port "\tlea ~a(%rip), %r12" lvar-label) ; Store effective address of label
+      (emit curr-port "\tmovq %r12, 0(%rbp)")
+      (emit curr-port "\tmovq %rbp,  %rdi") ; Store the heap pointer
+      ; Advance the heap pointer
+      ; First slot points to the label
+      ; Remaining slots contain the free variables
+      (emit curr-port "\taddq $~a,  %rbp" (+ word-size (* num-vars word-size)))
+      (fold-left
+        (lambda (si var) (emit-expr out-port si env var) (next-stack-index si))
+        (next-stack-index (- word-size)) ; Start with -1 * wordsize as the first slot is for the label
+        vars)
+      (emit curr-port "\tmovq %rdi,  %rax")
+      (emit curr-port "\torq $~a,  %rax" closure-tag))) ; Add closure tag
 
   (define (emit-expr out-port si env expr)
     (let ([curr-port (if (output-ports-in-fn out-port) (output-ports-fns out-port) (output-ports-main out-port))])
@@ -232,7 +278,8 @@
         [(if? expr) (emit-if out-port si env expr)]
         [(primcall? expr) (emit-primcall out-port si env expr)]
         [(labels? expr) (emit-labels out-port si env expr)]
-        [(labelcall? expr) (emit-label-call out-port si env expr)]
+        [(funcall? expr) (emit-funcall out-port si env expr)]
+        [(closure? expr) (emit-closure out-port si env expr)]
         [(eq? '() (eval expr)) (emit-expr out-port si env '())] ; Workaround until we can deal with quotes
         [else (error "emit-expr" (string-append "Unknown expression " (sexpr->string expr) " encountered"))])))
 
