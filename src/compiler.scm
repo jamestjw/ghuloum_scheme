@@ -1,5 +1,5 @@
 (library (compiler)
-  (export compile-program)
+  (export compile-program convert-lambda)
   (import (except (chezscheme) compile-program) (common))
 
   (define fixnum-shift 2)
@@ -102,7 +102,7 @@
     (emit out-port "\tcall *%rax"))
 
   ; TODO: Improve this
-  (define (variable? expr) (symbol? expr))
+  (define (variable? expr) (and (not (primitive? expr)) (symbol? expr)))
 
   ; TODO: This function should potentially also verify the structure
   ; of the body etc
@@ -269,6 +269,19 @@
       (emit curr-port "\tmovq %rdi,  %rax")
       (emit curr-port "\torq $~a,  %rax" closure-tag))) ; Add closure tag
 
+  ; Converts a lambda expression to one that is recognised by our code generator
+  (define (convert-lambda expr)
+    (cond
+      [(atom? expr) expr] ; If it is an atom, just return it
+      [(eq? 'lambda (car expr))
+          (let* ([formals (cadr expr)]
+            [body (caddr expr)]
+            ; Free vars are variables that are not formals
+            ; TODO: Check if vars are defined in the body
+            [free-vars (filter (lambda (e) (and (variable? e) (not (contains? formals e)))) (flatten body))])
+            (list 'lambda formals free-vars (convert-lambda body)))] ; Handle the case when it is a lambda
+      [else expr]))
+
   (define (emit-expr out-port si env expr)
     (let ([curr-port (if (output-ports-in-fn out-port) (output-ports-fns out-port) (output-ports-main out-port))])
       (cond
@@ -351,6 +364,10 @@
     (emit curr-port "\t~s %al" asm_op)
     (emit curr-port "\tsall $~a, %eax" bool-shift)
     (emit curr-port "\torl $~a, %eax" bool-tag))
+
+  (define (converted-lambda-to-closure expr)
+    (let ([formals (cadr expr)] [free-vars (caddr expr)] [body (cadddr expr)] [l (string->symbol (unique-label))])
+     (list 'labels (list (list l (list 'code formals free-vars body))) (cons 'closure (cons l free-vars)))))
 
   ; ******* Definition of primitives ******
   (define-primitive (add1 curr-port out-port si env arg)
@@ -662,5 +679,10 @@
     (emit-stack-load-register curr-port si "rdi") ; Load index to rdi
     (emit-stack-load-register curr-port (next-stack-index si) "rsi") ; Load value to rsi
     (emit curr-port "\tmovb %sil, ~a(%rax, %rdi)" word-size))
+
+  ; TODO: Make this work when the lambdas are recursive
+  (define-primitive (lambda curr-port out-port si env formals body)
+    (let ([converted-expr (convert-lambda (list 'lambda formals body))])
+      (emit-expr out-port si env (converted-lambda-to-closure converted-expr))))
   ; ******* Definition of primitives ******
 )

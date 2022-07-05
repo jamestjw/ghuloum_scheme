@@ -1,5 +1,5 @@
 (library (common)
-  (export contains? sexpr->string string-contains?)
+  (export contains? sexpr->string string-contains? flatten)
   (import (rnrs))
 
   (define (contains? list x)
@@ -46,4 +46,11 @@
       (else
         ; If the first `query-length` letters do not match, call the
         ; same function without the first character
-        (or (string=? (substring s 0 query-length) query) (string-contains? (string-drop-first-char s) query))))))
+        (or (string=? (substring s 0 query-length) query) (string-contains? (string-drop-first-char s) query)))))
+        
+  (define (flatten lst)
+    (let loop ((lst lst) (acc '()))
+      (cond
+        ((null? lst) acc)
+        ((pair? lst) (loop (car lst) (loop (cdr lst) acc)))
+        (else (cons lst acc))))))
