@@ -233,7 +233,11 @@
   ; (funcall lvar <Expr> ...)
   (define (emit-funcall out-port si env expr)
     ; TODO: Add validation of lvar
-    (let ([lvar (cadr expr)] [args (cddr expr)] [curr-port (get-current-port out-port)])
+    (let ([lvar (cadr expr)]
+          [args (cddr expr)]
+          [curr-port (get-current-port out-port)]
+          [closure-label (unique-label)]
+          [end-label (unique-label)])
       (fold-left
         (lambda (si arg)
           (emit-expr out-port si env arg)
@@ -244,11 +248,20 @@
       ; Assume that have a closure in %rax
       (emit-expr out-port si env lvar)
       (emit curr-port "\tmovq %r12, ~a(%rsp)" (- word-size)) ; Store value of r12 on the stack before we assign closure pointer
+
+      ; Code to handle calling of labels
+
+      ; Code to handle calling of closures
+      (emit-label curr-port closure-label) 
       (emit curr-port "\txorq $~a, %rax" closure-tag) ; Remove closure-tag
       (emit curr-port "\tmovq %rax, %r12") ; Store closure pointer in r12
       (emit curr-port "\tmovq 0(%rax), %rax") ; Copy address of the closure's label to rax
+      (emit-label curr-port end-label)
+
+      ; Call function
       (emit-call-address curr-port)
-      (emit curr-port "\tmovq ~a(%rsp), %r12" (- word-size)))) ; Restore value of r12
+      ; Restore value of r12
+      (emit curr-port "\tmovq ~a(%rsp), %r12" (- word-size))))
 
   ; TODO: Verify that the body of the expression conforms to a closure call
   (define (emit-closure out-port si env expr)
