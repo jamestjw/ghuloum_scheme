@@ -1,5 +1,5 @@
 (library (compiler)
-  (export compile-program convert-lambda)
+  (export compile-program)
   (import (except (chezscheme) compile-program) (common))
 
   (define fixnum-shift 2)
@@ -71,6 +71,8 @@
         (putprop 'prim-name '*arg-count* (length '(arg* ...)))
         (putprop 'prim-name '*emitter* (lambda (curr-port out-port si env arg* ...) b b* ...)))]))
 
+  (define primitives '(let let* if funcall closure lambda))
+
   (define (primitive? x)
     (and (symbol? x) (getprop x '*is-prim*)))
 
@@ -102,7 +104,7 @@
     (emit out-port "\tcall *%rax"))
 
   ; TODO: Improve this
-  (define (variable? expr) (and (not (primitive? expr)) (symbol? expr)))
+  (define (variable? expr) (and (not (or (primitive? expr) (contains? primitives expr))) (symbol? expr)))
 
   ; TODO: This function should potentially also verify the structure
   ; of the body etc
@@ -116,6 +118,8 @@
   (define (funcall? expr) (eq? (car expr) 'funcall))
 
   (define (closure? expr) (eq? (car expr) 'closure))
+
+  (define (lambda? expr) (eq? (car expr) 'lambda))
 
   (define (get-current-port out-port) (if (output-ports-in-fn out-port) (output-ports-fns out-port) (output-ports-main out-port)))
 
@@ -239,16 +243,20 @@
           (emit-expr out-port si env arg)
           (emit-stack-save curr-port si)
           (next-stack-index si))
-        (next-stack-index (next-stack-index (- word-size))) ; Skip two stack indexes as we use it for the return address
+        (next-stack-index (next-stack-index si)) ; Skip two stack indexes as we use it for the return address
         args)
       ; Assume that have a closure in %rax
       (emit-expr out-port si env lvar)
-      (emit curr-port "\tmovq %r12, ~a(%rsp)" (- word-size)) ; Store value of r12 on the stack before we assign closure pointer
+      (emit curr-port "\tmovq %r12, ~a(%rsp)" (next-stack-index si)) ; Store value of r12 on the stack before we assign closure pointer
       (emit curr-port "\txorq $~a, %rax" closure-tag) ; Remove closure-tag
       (emit curr-port "\tmovq %rax, %r12") ; Store closure pointer in r12
       (emit curr-port "\tmovq 0(%rax), %rax") ; Copy address of the closure's label to rax
+      ; Shift stack pointer to right spot before function call
+      (emit curr-port "\taddq $~a, %rsp" (+ si word-size))
       (emit-call-address curr-port)
-      (emit curr-port "\tmovq ~a(%rsp), %r12" (- word-size)))) ; Restore value of r12
+      ; Restore stack pointer
+      (emit curr-port "\tsubq $~a, %rsp" (+ si word-size))
+      (emit curr-port "\tmovq ~a(%rsp), %r12" (next-stack-index si)))) ; Restore value of r12
 
   ; TODO: Verify that the body of the expression conforms to a closure call
   (define (emit-closure out-port si env expr)
@@ -277,10 +285,9 @@
           (let* ([formals (cadr expr)]
             [body (caddr expr)]
             ; Free vars are variables that are not formals
-            ; TODO: Check if vars are defined in the body
-            [free-vars (filter (lambda (e) (and (variable? e) (not (contains? formals e)))) (flatten body))])
+            [free-vars (find-fvs body formals)])
             (list 'lambda formals free-vars (convert-lambda body)))] ; Handle the case when it is a lambda
-      [else expr]))
+      [else (map convert-lambda expr)]))
 
   (define (emit-expr out-port si env expr)
     (let ([curr-port (if (output-ports-in-fn out-port) (output-ports-fns out-port) (output-ports-main out-port))])
@@ -365,9 +372,56 @@
     (emit curr-port "\tsall $~a, %eax" bool-shift)
     (emit curr-port "\torl $~a, %eax" bool-tag))
 
+  ; Handle nested lambdas
   (define (converted-lambda-to-closure expr)
-    (let ([formals (cadr expr)] [free-vars (caddr expr)] [body (cadddr expr)] [l (string->symbol (unique-label))])
-     (list 'labels (list (list l (list 'code formals free-vars body))) (cons 'closure (cons l free-vars)))))
+    ; Whenever it encounters a lambda, it returns an equivalent closure and list of codes.
+    ; If the expression is not a lambda, it returns the same expression with an empty list of codes.
+    (define (extract-lambda expr)
+        (cond
+          [(atom? expr) (list expr '())]
+          [(lambda? expr)
+                (let* ([formals (cadr expr)]
+                      [free-vars (caddr expr)]
+                      [body (cadddr expr)]
+                      [converted-body-code (extract-lambda body)]
+                      [converted-body (car converted-body-code)]
+                      [extracted-codes (cadr converted-body-code)]
+                      [l (string->symbol (unique-label))])
+                  (list
+                    (append (list 'closure l) free-vars) ; Replace lambda with closure expression
+                    (append extracted-codes (list (list
+                                                    l
+                                                    (list 'code formals free-vars converted-body))))))]
+          [else (let ([res (map extract-lambda expr)])
+                      (list
+                        (map car res)
+                        (apply append (map cadr res))))]))
+    (let ([res (extract-lambda expr)])
+      (list 'labels (cadr res) (car res))))
+
+  ; Returns a list of free variables in the given expression
+  (define (find-fvs expr env)
+    (define (find-fvs-for-list exprs env)
+      (fold-left (lambda (freevars binding)
+                (append
+                  freevars
+                  (find-fvs binding env)))
+                '()
+                exprs))
+    (cond
+      [(immediate? expr) '()]
+      [(variable? expr) (if (contains? env expr) '() (list expr))]
+      [(let? expr) (let ([new-env (append (map car (cadr expr)) env)])
+                     (append
+                       (find-fvs-for-list (map cadr (cadr expr)) env)  ; Apply this to rhs of bindings
+                       (find-fvs (caddr expr) new-env)))]
+      [(if? expr) (find-fvs-for-list (cdr expr) env)]
+      [(funcall? expr) (find-fvs-for-list (cdr expr) env)]
+      [(lambda? expr) (find-fvs-for-list (cddr expr) (append (cadr expr) env))] ; Doing this before primcall
+      [(primcall? expr) (find-fvs-for-list (cdr expr) env)]
+      [(labels? expr) '()] ; We don't expect users to use this form, hence its fine to skip the implementation
+      [(closure? expr) (find-fvs-for-list (cdr expr) env)]
+      [else '()]))
 
   ; ******* Definition of primitives ******
   (define-primitive (add1 curr-port out-port si env arg)

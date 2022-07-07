@@ -1,5 +1,5 @@
 (library (common)
-  (export contains? sexpr->string string-contains? flatten)
+  (export contains? sexpr->string string-contains? flatten dedupe)
   (import (rnrs))
 
   (define (contains? list x)
@@ -53,4 +53,9 @@
       (cond
         ((null? lst) acc)
         ((pair? lst) (loop (car lst) (loop (cdr lst) acc)))
-        (else (cons lst acc))))))
+        (else (cons lst acc)))))
+  
+  (define (dedupe e)
+    (if (null? e) '()
+        (cons (car e) (dedupe (filter (lambda (x) (not (equal? x (car e)))) 
+                                        (cdr e)))))))
