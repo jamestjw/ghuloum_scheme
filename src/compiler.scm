@@ -25,6 +25,8 @@
 
   (define (next-stack-index si) (- si word-size))
 
+  (define (next-heap-index hi) (+ hi word-size))
+
   ; One port for code segment and another for text segment
   (define-record-type output-ports (fields fns main in-fn))
 
@@ -190,8 +192,8 @@
 
   (define (extend-env-with-free-vars vars env)
     (car (fold-left
-      (lambda (acc var) (cons (extend-env var (cdr acc) (make-closure-ptr-offset (car acc))) (next-stack-index (cdr acc)) ))
-      (cons env (- word-size))
+      (lambda (acc var) (cons (extend-env var (make-closure-ptr-offset (cdr acc)) (car acc)) (next-heap-index (cdr acc))))
+      (cons env word-size) ; Start with an offset of 1 word size as the first slot is for the label
       vars)))
 
   ; Handle this syntax
@@ -228,7 +230,7 @@
                     (let* ([l (unique-label)] [new-env (extend-env label l env)])
                       (emit-code new-out-port new-env l lexpr)
                       new-env))
-                    '()
+                    env
                     labels
                     lexprs)])
       (emit-expr out-port si new-env body))) ; Emit body using original port
@@ -263,16 +265,19 @@
     (let* ([lvar-label (lookup-env (cadr expr) env)]
             [vars (cddr expr)] [curr-port (get-current-port out-port)]
             [num-vars (length vars)])
-      (emit curr-port "\tlea ~a(%rip), %r12" lvar-label) ; Store effective address of label
-      (emit curr-port "\tmovq %r12, 0(%rbp)")
-      (emit curr-port "\tmovq %rbp,  %rdi") ; Store the heap pointer
+      (emit curr-port "\tlea ~a(%rip), %r13" lvar-label) ; Store effective address of label
+      (emit curr-port "\tmovq %r13, 0(%rbp)")
+      (emit curr-port "\tmovq %rbp, %rdi") ; Store the heap pointer
       ; Advance the heap pointer
       ; First slot points to the label
       ; Remaining slots contain the free variables
       (emit curr-port "\taddq $~a,  %rbp" (+ word-size (* num-vars word-size)))
       (fold-left
-        (lambda (si var) (emit-expr out-port si env var) (next-stack-index si))
-        (next-stack-index (- word-size)) ; Start with -1 * wordsize as the first slot is for the label
+        (lambda (hi var)
+                (emit-expr out-port hi env var)
+                (emit curr-port "\tmovq %rax, ~a(%rdi)" hi)
+                (next-heap-index hi))
+        word-size ; Start with +1 * wordsize as the first slot is for the label
         vars)
       (emit curr-port "\tmovq %rdi,  %rax")
       (emit curr-port "\torq $~a,  %rax" closure-tag))) ; Add closure tag
@@ -442,15 +447,12 @@
     (emit curr-port "\tshr $~a, %eax" char2fixnum-shift))
 
   (define-primitive (zero? curr-port out-port si env arg)
-    (if (integer? arg)
-      (begin
-        (emit-expr out-port si env arg)
-        (emit curr-port "\tcmpl $0, %eax")              ; Compares %eax to 0
-        (emit curr-port "\tmovl $0, %eax")              ; Zeroes %eax
-        (emit curr-port "\tsete %al")                   ; Set lower byte of %eax to 1 if comparison was successful
-        (emit curr-port "\tsall $~a, %eax" bool-shift)  ; Apply appropriate shift
-        (emit curr-port "\torl $~a, %eax" bool-tag))    ; and tag
-      (error "emit-expr" "zero? can only be called with integers")))
+    (emit-expr out-port si env arg)
+    (emit curr-port "\tcmpl $0, %eax")              ; Compares %eax to 0
+    (emit curr-port "\tmovl $0, %eax")              ; Zeroes %eax
+    (emit curr-port "\tsete %al")                   ; Set lower byte of %eax to 1 if comparison was successful
+    (emit curr-port "\tsall $~a, %eax" bool-shift)  ; Apply appropriate shift
+    (emit curr-port "\torl $~a, %eax" bool-tag))    ; and tag)
 
   (define-primitive (null? curr-port out-port si env arg)
     (emit-expr out-port si env arg)
@@ -734,9 +736,9 @@
     (emit-stack-load-register curr-port (next-stack-index si) "rsi") ; Load value to rsi
     (emit curr-port "\tmovb %sil, ~a(%rax, %rdi)" word-size))
 
-  ; TODO: Make this work when the lambdas are recursive
   (define-primitive (lambda curr-port out-port si env formals body)
-    (let ([converted-expr (convert-lambda (list 'lambda formals body))])
-      (emit-expr out-port si env (converted-lambda-to-closure converted-expr))))
+    (let* ([converted-lambda-expr (convert-lambda (list 'lambda formals body))]
+            [converted-closure-expr (converted-lambda-to-closure converted-lambda-expr)])
+      (emit-expr out-port si env converted-closure-expr)))
   ; ******* Definition of primitives ******
 )
