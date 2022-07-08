@@ -23,9 +23,15 @@
 
   (define (out-file) (open-output-file "output.s" 'truncate))
 
-  (define (next-stack-index si) (- si word-size))
+  (define (next-index-by-n op si n) (apply op (list si (* n word-size))))
+
+  (define (next-stack-index-by-n si n) (next-index-by-n - si n))
+
+  (define (next-stack-index si) (next-index-by-n - si 1))
 
   (define (next-heap-index hi) (+ hi word-size))
+
+  (define (next-heap-index-by-n si n) (next-index-by-n + si n))
 
   ; One port for code segment and another for text segment
   (define-record-type output-ports (fields fns main in-fn))
@@ -110,7 +116,9 @@
 
   ; TODO: This function should potentially also verify the structure
   ; of the body etc
-  (define (let? expr) (or (eq? (car expr) 'let) (eq? (car expr) 'let*)))
+  (define (let? expr) (and
+                        (atom? (car expr))
+                        (contains? '(let let* letrec) (car expr))))
 
   ; TODO: Verify structure of the body
   (define (if? expr) (eq? (car expr) 'if))
@@ -139,19 +147,66 @@
 
   (define-record-type closure-ptr-offset (fields offset))
 
+  (define-record-type letrec-stack-offset (fields offset))
+
   (define (emit-let out-port si env expr)
     (define bindings (cadr expr))
     (define body (caddr expr))
-    (let process-let ([b* bindings] [si si] [new-env env])
+    (define let-flavor (car expr)) ; Either `let`, `let*` or `letrec`
+    (define input-env
+      (if (eq? let-flavor 'letrec)
+      ; Preallocate the vars on the stack
+      ; Reverse as this method does it in the reverse order but in the process-let
+      ; function below we go from left to right.
+      (car (extend-env-with-letrec-vars (map car bindings) env si)) ; TODO: Avoid ugly `car` hack here
+      env))
+    (define input-si
+      (if (eq? let-flavor 'letrec)
+          (next-stack-index-by-n si (length bindings)) ; We need the space to preallocate the vars in the let-binding
+          si))
+    (let process-let ([b* bindings] [si input-si] [new-env input-env])
       (cond
-        [(null? b*) (emit-expr out-port si new-env body)]
+        [(null? b*)
+          (if (eq? let-flavor 'letrec)
+              (begin
+                (for-each (lambda (v-loc)
+                  (emit-expr out-port si input-env (car v-loc))
+                  (emit (get-current-port out-port) "\tmovq ~a(%r14), %r15" (cdr v-loc))
+                  (emit (get-current-port out-port) "\tmovq %rax, 0(%r15)"))
+                  letrec-backfill-list)
+                (clear-letrec-backfill))
+              '())
+          (emit-expr out-port si new-env body)]
         ; Here we assume that `b` is a pair
         ; For the classic `let`, we use the environment that was passed in,
         ; otherwise we use the updated environment as variables are binded
-        [else (let ([b (car b*)] [env-to-use (if (eq? 'let (car expr)) env new-env)])
-          (emit-expr out-port si env-to-use (cadr b))
-          (emit-stack-save (get-current-port out-port) si)
-          (process-let (cdr b*) (next-stack-index si) (extend-env (car b) si new-env)))])))
+        [else (cond
+                [(eq? let-flavor 'let) (let ([b (car b*)]
+                                              [env-to-use env]) ; Use the original environment
+                                              (emit-expr out-port si env-to-use (cadr b))
+                                              (emit-stack-save (get-current-port out-port) si)
+                                              (process-let
+                                                (cdr b*)
+                                                (next-stack-index si)
+                                                (extend-env (car b) si new-env)))]
+                [(eq? let-flavor 'let*) (let ([b (car b*)]
+                                              [env-to-use new-env]) ; Use the new environment
+                                              (emit-expr out-port si env-to-use (cadr b))
+                                              (emit-stack-save (get-current-port out-port) si)
+                                              (process-let
+                                                (cdr b*)
+                                                (next-stack-index si)
+                                                (extend-env (car b) si new-env)))]
+                [(eq? let-flavor 'letrec) (let ([b (car b*)]
+                                                [env-to-use new-env]) ; Use the new environment
+                                                (emit-expr out-port si env-to-use (cadr b))
+                                                (emit-stack-save (get-current-port out-port) (letrec-stack-offset-offset (lookup-env (car b) new-env)))
+                                                (process-let
+                                                  (cdr b*)
+                                                  si
+                                                  new-env))]
+                [else (error "emit-let" (string-append "Unknown let flavor encountered: " (symbol->string let-flavor)))])]))
+)
 
   (define (emit-stack-load out-port si) (emit-stack-load-register out-port si "rax"))
   (define (emit-stack-load-register out-port si register) (emit out-port "\tmovq ~s(%rsp), %~a" si register))
@@ -161,10 +216,12 @@
       (cond
         [res (cond
           [(closure-ptr-offset? res) (emit out-port "\tmovq ~a(%r12), %rax" (closure-ptr-offset-offset res))]
+          [(letrec-stack-offset? res) (emit out-port "\tmovq ~a(%rsp), %rax" (letrec-stack-offset-offset res))]
           [else (emit-stack-load out-port res)])]
         [else (error "emit-variable-ref" (string-append "Variable not found in scope: " (symbol->string var)))])))
 
   (define (emit-je out-port label) (emit out-port "\tje ~a" label))
+  (define (emit-jne out-port label) (emit out-port "\tjne ~a" label))
   (define (emit-jmp out-port label) (emit out-port "\tjmp ~a" label))
   (define (emit-label out-port label) (emit out-port "~a:" label))
 
@@ -185,10 +242,22 @@
 
   ; Returns new stack index and environment
   (define (extend-env-with-formals formals env si)
+    (extend-env-with-vars-in-stack formals env si))
+
+  (define (extend-env-with-vars-in-stack vars env si)
     (fold-left
-      (lambda (acc formal) (cons (extend-env formal (cdr acc) (car acc)) (next-stack-index (cdr acc)) ))
+      (lambda (acc var) (cons (extend-env var (cdr acc) (car acc)) (next-stack-index (cdr acc))))
       (cons env si)
-      formals))
+      vars))
+
+  (define (extend-env-with-letrec-vars vars env si)
+    (fold-left
+      (lambda (acc var)
+              (cons
+                (extend-env var (make-letrec-stack-offset (cdr acc)) (car acc))
+                (next-stack-index (cdr acc))))
+      (cons env si)
+      vars))
 
   (define (extend-env-with-free-vars vars env)
     (car (fold-left
@@ -274,9 +343,19 @@
       (emit curr-port "\taddq $~a,  %rbp" (+ word-size (* num-vars word-size)))
       (fold-left
         (lambda (hi var)
-                (emit-expr out-port hi env var)
-                (emit curr-port "\tmovq %rax, ~a(%rdi)" hi)
-                (next-heap-index hi))
+                (let ([loc (lookup-env var env)])
+                  ; If the offset is greater than where we currently are, it means
+                  ; that the function will not be defined yet and will have to be backfilled later
+                  ; Since we generate closures, we can be sure that expr is a var
+                  (if (letrec-stack-offset? loc)
+                    (begin
+                      (emit curr-port "\tleaq ~a(%rdi), %rax" hi)
+                      (emit curr-port "\tmovq %rax, ~a(%r14)" (add-letrec-backfill var)))
+                    (begin
+                      (emit-expr out-port hi env var)
+                      (emit curr-port "\tmovq %rax, ~a(%rdi)" hi)
+                      (next-heap-index hi)))))
+
         word-size ; Start with +1 * wordsize as the first slot is for the label
         vars)
       (emit curr-port "\tmovq %rdi,  %rax")
@@ -316,6 +395,24 @@
           (set! count (add1 count))
           L))))
 
+  (define letrec-backfill-list '())
+
+  (define letrec-backfill-location 0)
+
+  (define (clear-letrec-backfill) (set! letrec-backfill-list '()) (set! letrec-backfill-location 0))
+
+  (define (add-letrec-backfill sym-name)
+    (let ([loc letrec-backfill-location])
+        ; Check if we have used too much space for the backfill list
+        (if (eq? loc (next-heap-index-by-n 0 20))
+          (error "Letrec backfill" "Exceeded limit")
+          (begin
+            (set!
+              letrec-backfill-list
+              (cons (cons sym-name letrec-backfill-location) letrec-backfill-list))
+            (set! letrec-backfill-location (next-heap-index letrec-backfill-location))
+            loc))))
+
   (define (emit-entrypoint out-ports)
     (emit-function-header (output-ports-fns out-ports) "_scheme_entry")
     (emit (output-ports-fns out-ports) "\tmovq %rdi, %rcx") ; Get address of struct to store register values (from 1st arg of _scheme_entry)
@@ -328,6 +425,8 @@
 
     (emit (output-ports-fns out-ports) "\tmovq %rsi, %rsp") ; Store stack pointer in rsp
     (emit (output-ports-fns out-ports) "\tmovq %rdx, %rbp") ; Store heap pointer in rbp
+    (emit (output-ports-fns out-ports) "\tmovq %rbp, %r14") ; Use r14 as the pointer for letrec backfills
+    (emit (output-ports-fns out-ports) "\taddq $~a, %rbp" (next-heap-index-by-n 0 20)) ; Reserve 20 slots for letrec backfills
 
     (emit (output-ports-fns out-ports) "\tcall _L_scheme_entry")
 
@@ -740,5 +839,33 @@
     (let* ([converted-lambda-expr (convert-lambda (list 'lambda formals body))]
             [converted-closure-expr (converted-lambda-to-closure converted-lambda-expr)])
       (emit-expr out-port si env converted-closure-expr)))
+
+  (define-primitive (or curr-port out-port si env expr1 expr2)
+    (let ([end-label (unique-label)] [true-label (unique-label)])
+      (emit-expr out-port si env expr1)
+      (emit curr-port "\tcmp $~s, %al" (immediate-rep #f)) ; Anything that is not #f is truthy
+      (emit-jne curr-port true-label)
+      (emit-expr out-port si env expr2)
+      (emit curr-port "\tcmp $~s, %al" (immediate-rep #f)) ; Anything that is not #f is truthy
+      (emit-jne curr-port true-label)
+      (emit-expr out-port si env #f) ; If we missed the jump, then emit a false
+      (emit-jmp curr-port end-label)           ; And immediately jump to the end
+      (emit-label curr-port true-label)
+      (emit-expr out-port si env #t)
+      (emit-label curr-port end-label)))
+
+  (define-primitive (and curr-port out-port si env expr1 expr2)
+    (let ([end-label (unique-label)] [false-label (unique-label)])
+      (emit-expr out-port si env expr1)
+      (emit curr-port "\tcmp $~s, %al" (immediate-rep #f)) ; Anything that is not #f is truthy
+      (emit-je curr-port false-label)
+      (emit-expr out-port si env expr2)
+      (emit curr-port "\tcmp $~s, %al" (immediate-rep #f)) ; Anything that is not #f is truthy
+      (emit-je curr-port false-label)
+      (emit-expr out-port si env #t)    ; If we missed the jump, then emit a true
+      (emit-jmp curr-port end-label)    ; And immediately jump to the end
+      (emit-label curr-port false-label)
+      (emit-expr out-port si env #f)
+      (emit-label curr-port end-label)))
   ; ******* Definition of primitives ******
 )
